@@ -1,0 +1,10 @@
+Beyond includes or is derived from the following software.
+
+Bun (https://github.com/oven-sh/bun)
+  Copyright (c) Oven, Inc. and Bun contributors. MIT License.
+  Beyond ports the logic of Bun's Rust implementations of web APIs and of its
+  HTTP server to the QuickJS-NG engine.
+
+uSockets and uWebSockets, as forked by Bun
+  (https://github.com/uNetworking/uSockets, https://github.com/uNetworking/uWebSockets)
+  Copyright (c) Alex Hultman and contributors. Apache License 2.0.
