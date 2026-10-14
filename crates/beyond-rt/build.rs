@@ -31,7 +31,7 @@ fn main() {
     for f in ["bsd.c", "context.c", "loop.c", "socket.c", "udp.c", "eventing/epoll_kqueue.c"] {
         c.file(usockets.join(f));
     }
-    for f in ["native/bun_hooks.c", "native/stubs.c", "native/module.c"] {
+    for f in ["native/bun_hooks.c", "native/stubs.c", "native/module.c", "native/server.c"] {
         c.file(f);
     }
     c.compile("beyond_c");

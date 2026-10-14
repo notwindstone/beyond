@@ -49,5 +49,36 @@ networking code uses its extensions) and zlib.
   `Timeout` objects (`ref`, `unref`, `refresh`), as Bun's; `performance.now`.
   The event loop waits on uSockets' until the next timer is due, as Bun's
   does, and runs the jobs callbacks queue in between.
-- The HTTP layer (Bun's uSockets and uWebSockets) is built in; `Beyond.serve`
-  is next.
+- `Beyond.serve({ port, hostname, fetch, error })`, as `Bun.serve`: HTTP/1.1
+  on Bun's uSockets and uWebSockets, keep-alive and pipelining included. The
+  `fetch` handler returns a `Response` or a promise of one; request bodies
+  are read whole before it runs. `server.port`, `server.url`, `server.stop()`.
+- `Headers`, `Request` and `Response` as the Fetch standard has them, with
+  string and byte bodies (`text`, `json`, `arrayBuffer`, `bytes`;
+  `Response.json`, `Response.redirect`, `Response.error`). Written in
+  TypeScript that Luminous compiles to native code: the classes keep their
+  state in plain fields (not `#private` ones) and check header names and
+  values without regular expressions, so that every constructor and method
+  on a request's path is native. A response's headers are made only when the
+  program reads them; most responses only send a content type.
+
+Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Blob` and `FormData`,
+`fetch` (the client), and the other globals of the plan.
+
+## Performance
+
+`Beyond.serve` against `Bun.serve` (Bun 1.4.2), the same program
+(`Response("Hello World!")` and `Response.json({...})`), 10 seconds of
+`oha -c 50` on the same 4-core machine as the server:
+
+| | requests/s | p99 latency | peak memory |
+|---|---|---|---|
+| Beyond, text | 60,636 | 1.92 ms | 14.3 MB |
+| Bun, text | 61,342 | 2.29 ms | 26.0 MB |
+| Beyond, JSON | 58,684 | 1.96 ms | 14.7 MB |
+| Bun, JSON | 59,780 | 2.20 ms | 27.2 MB |
+
+Throughput is level with Bun's here (the load generator shares the cores),
+in about half the memory. Before the request path compiled to native code
+(with `#private` fields and regular expressions in `Headers`), Beyond
+answered 37,661 text and 25,350 JSON requests a second.
