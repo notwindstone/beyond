@@ -1,0 +1,102 @@
+//! `beyond build` / `beyond run`: a program compiled by Luminous with
+//! Beyond's runtime: its modules (lib/, `beyond:*`), its globals (the
+//! prelude lib/globals.ts), and its native core (beyond-rt: the event loop,
+//! timers, the HTTP server), linked in.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
+use luminous_cli::{BuildOpts, EmbedOpts};
+
+#[derive(Parser)]
+#[command(name = "beyond", about = "A JavaScript and TypeScript runtime built on Luminous")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Compile a program to a native executable.
+    Build {
+        input: PathBuf,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[command(flatten)]
+        opts: BuildOpts,
+    },
+    /// Compile and run a program.
+    Run {
+        input: PathBuf,
+        #[command(flatten)]
+        opts: BuildOpts,
+        /// Arguments passed to the program.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+/// Beyond's source tree (its lib/ modules).
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+/// What Beyond adds to a program.
+fn embed(opts: &mut BuildOpts) -> Result<()> {
+    let lib = root().join("lib");
+    // The native core, built next to this executable (the same target
+    // directory).
+    let exe = std::env::current_exe()?;
+    let rt = exe.parent().unwrap().join("libbeyond_rt.a");
+    if !rt.exists() {
+        bail!("{} not found (build the workspace: cargo build)", rt.display());
+    }
+    let e: &mut EmbedOpts = &mut opts.embed;
+    e.preludes.insert(0, lib.join("globals.ts"));
+    e.module_dirs.push(("beyond:".into(), lib));
+    e.c_modules.push(("beyond:native".into(), "js_init_module_beyond".into()));
+    e.init_fn = Some("beyond_init".into());
+    e.loop_fn = Some("beyond_loop".into());
+    e.link.push(rt.display().to_string());
+    // (What the Rust standard library, uWebSockets and zlib need.)
+    for l in ["-lstdc++", "-lz", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
+        e.link.push(l.into());
+    }
+    Ok(())
+}
+
+fn main() {
+    if let Err(e) = real_main() {
+        let msg = format!("{e:#}");
+        if msg.contains('\n') {
+            eprintln!("{msg}")
+        } else {
+            eprintln!("beyond: {msg}")
+        }
+        std::process::exit(1);
+    }
+}
+
+fn real_main() -> Result<()> {
+    let fopts = luminous_front::Options { int_wrapping: true };
+    match Cli::parse().cmd {
+        Cmd::Build { input, output, mut opts } => {
+            embed(&mut opts)?;
+            let output = output.unwrap_or_else(|| input.with_extension(""));
+            luminous_cli::build(&input, &output, &opts, &fopts)
+        }
+        Cmd::Run { input, mut opts, args } => {
+            embed(&mut opts)?;
+            let dir = luminous_cli::tempdir()?;
+            let exe = dir.join("a.out");
+            let r = luminous_cli::build(&input, &exe, &opts, &fopts).and_then(|()| {
+                let status = Command::new(&exe).args(&args).status().context("running the program")?;
+                Ok(status.code().unwrap_or(1))
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+            std::process::exit(r?);
+        }
+    }
+}

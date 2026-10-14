@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = ["crates/beyond", "crates/beyond-rt"]
+# (Luminous is a workspace of its own, used by path.)
+exclude = ["vendor/luminous"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[profile.release]
+debug = 1

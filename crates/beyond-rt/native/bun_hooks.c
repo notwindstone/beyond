@@ -233,3 +233,6 @@ void Bun__addrinfo_freeRequest(struct addrinfo_request *req, int error) {
 }
 
 struct addrinfo_result *Bun__addrinfo_getRequestResult(struct addrinfo_request *req) { return &req->result; }
+
+// For Beyond's loop (src/lib.rs): whether sockets keep it alive.
+int beyond_loop_num_polls(struct us_loop_t *loop) { return loop->num_polls; }

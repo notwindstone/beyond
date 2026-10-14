@@ -31,3 +31,23 @@ How it is built, following [Bun](https://github.com/oven-sh/bun) (see
 
 The native core is Rust (a static library with a C interface, linked into
 each program), with uSockets and uWebSockets as C and C++.
+
+## Building
+
+```sh
+scripts/setup.sh          # Luminous (a submodule) and its engine
+cargo build --release
+target/release/beyond run app.ts
+```
+
+`beyond build app.ts -o app` writes the executable. Needs clang (Bun's
+networking code uses its extensions) and zlib.
+
+## Status
+
+- Timers: `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, with
+  `Timeout` objects (`ref`, `unref`, `refresh`), as Bun's; `performance.now`.
+  The event loop waits on uSockets' until the next timer is due, as Bun's
+  does, and runs the jobs callbacks queue in between.
+- The HTTP layer (Bun's uSockets and uWebSockets) is built in; `Beyond.serve`
+  is next.
