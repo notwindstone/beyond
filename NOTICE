@@ -5,6 +5,10 @@ Bun (https://github.com/oven-sh/bun)
   Beyond ports the logic of Bun's Rust implementations of web APIs and of its
   HTTP server to the QuickJS-NG engine.
 
+  Files copied from Bun (commit e40a58ad875f91bb95fb05fbd87bd17c6a93566b) are listed in
+  vendor/README.md; crates/beyond-rt/native/bun_hooks.c follows Bun's
+  src/runtime/socket/uws_dispatch.rs.
+
 uSockets and uWebSockets, as forked by Bun
   (https://github.com/uNetworking/uSockets, https://github.com/uNetworking/uWebSockets)
   Copyright (c) Alex Hultman and contributors. Apache License 2.0.
