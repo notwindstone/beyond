@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Beyond against Bun, runs alternated: the server (`oha -c 50` for 10 s, the
-# text and the JSON program), the fetch() client (1, 10 and 50 in
-# flight, against a Beyond server) and URL parsing. Needs bun and oha on
-# PATH, and Beyond built (cargo build --release).
+# text and the JSON program), JSON of typed (`aot type`) and plain objects
+# from the server, the fetch() client (1, 10 and 50 in flight, against a
+# Beyond server) and URL parsing. Needs bun and oha on PATH, and Beyond
+# built (cargo build --release).
 #
-#   bench/run.sh [serve|fetch|url]...
+#   bench/run.sh [serve|json|fetch|url]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
 beyond=target/release/beyond
@@ -36,19 +37,46 @@ stop() {
   wait 2>/dev/null || true
 }
 
+# Loads the running server for 10 s: requests a second, p99 latency and
+# its memory (labeled $1 $2).
+measure() {
+  local pid rss
+  pid=$(jobs -p | tail -1)
+  printf '%-11s %-6s ' "$1" "$2"
+  oha -c 50 -z 10s --no-tui --output-format json http://127.0.0.1:3000/ > "$work/oha.json"
+  rss=$(ps -o rss= -p "$(pgrep -P "$pid" || echo "$pid")" | tail -1)
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["summary"]; p=d["latencyPercentiles"]; print("%8.0f requests/s  p99 %.2f ms  RSS %d MB" % (s["requestsPerSec"], p["p99"]*1000, int(sys.argv[2])//1024))' "$work/oha.json" "$rss"
+}
+
 serve() {
   for name in serve-text serve-json; do
     prepare "$name"
     for round in 1 2; do
       for who in beyond bun; do
         if [ $who = beyond ]; then serving "$work/$name"; else serving bun "$work/$name.bun.ts"; fi
-        local pid
-        pid=$(jobs -p | tail -1)
-        printf '%-11s %-6s ' "$name" "$who"
-        oha -c 50 -z 10s --no-tui --output-format json http://127.0.0.1:3000/ > "$work/oha.json"
-        local rss
-        rss=$(ps -o rss= -p "$(pgrep -P "$pid" || echo "$pid")" | tail -1)
-        python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["summary"]; p=d["latencyPercentiles"]; print("%8.0f requests/s  p99 %.2f ms  RSS %d MB" % (s["requestsPerSec"], p["p99"]*1000, int(sys.argv[2])//1024))' "$work/oha.json" "$rss"
+        measure "$name" "$who"
+        stop
+      done
+    done
+  done
+}
+
+# A user made for each request, and a list of 50: Beyond with them typed
+# (`aot type`), Beyond with them plain (`type`), and Bun (plain: it has no
+# typed objects).
+json() {
+  for name in serve-user serve-users; do
+    prepare "$name"
+    mv "$work/$name" "$work/$name-typed"
+    prepare "$name" 's/^aot type/type/'
+    for round in 1 2; do
+      for who in typed plain bun; do
+        case $who in
+          typed) serving "$work/$name-typed" ;;
+          plain) serving "$work/$name" ;;
+          bun) serving bun "$work/$name.bun.ts" ;;
+        esac
+        measure "$name" "$who"
         stop
       done
     done
