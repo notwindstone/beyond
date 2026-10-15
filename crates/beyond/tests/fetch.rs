@@ -1,12 +1,24 @@
 //! `fetch()`: builds tests/fetch/app.ts for a server of the test's own (on
-//! a port of its choosing, put in for `__PORT__`) and checks its output
-//! against Bun's (tests/fetch/app.out, made with `cargo test --test fetch
-//! -- --ignored`, which runs the program with `bun` instead).
+//! a port of its choosing, put in for `__PORT__`), the same over TLS with a
+//! certificate of a CA the test makes (`__TLS_PORT__`, the CA's PEM put in
+//! for `__CA__`) and with a self-signed one (`__SELF_PORT__`), and checks
+//! its output against Bun's (tests/fetch/app.out, made with `cargo test
+//! --test fetch -- --ignored`, which runs the program with `bun` instead).
 
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener};
+use std::sync::Arc;
+
+use openssl::asn1::Asn1Time;
+use openssl::bn::{BigNum, MsbOption};
+use openssl::hash::MessageDigest;
+use openssl::pkey::{PKey, Private};
+use openssl::rsa::Rsa;
+use openssl::ssl::{SslAcceptor, SslMethod};
+use openssl::x509::extension::{BasicConstraints, SubjectAlternativeName};
+use openssl::x509::{X509, X509NameBuilder};
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
@@ -40,7 +52,7 @@ impl Req {
 }
 
 /// The next request on `r` (None once the client closes the connection).
-fn read_req(r: &mut BufReader<TcpStream>) -> Option<Req> {
+fn read_req<S: Read>(r: &mut BufReader<S>) -> Option<Req> {
     let mut line = String::new();
     if r.read_line(&mut line).ok()? == 0 {
         return None;
@@ -79,7 +91,7 @@ fn read_req(r: &mut BufReader<TcpStream>) -> Option<Req> {
     Some(req)
 }
 
-fn send(s: &mut TcpStream, status: &str, headers: &[(&str, &str)], body: &[u8]) {
+fn send<S: Write>(s: &mut S, status: &str, headers: &[(&str, &str)], body: &[u8]) {
     let mut out = format!("HTTP/1.1 {status}\r\n");
     for (n, v) in headers {
         out.push_str(&format!("{n}: {v}\r\n"));
@@ -90,7 +102,7 @@ fn send(s: &mut TcpStream, status: &str, headers: &[(&str, &str)], body: &[u8]) 
 }
 
 /// Answers the requests on one connection; false once it is to be closed.
-fn answer(s: &mut TcpStream, req: &Req) -> bool {
+fn answer<S: Write>(s: &mut S, req: &Req) -> bool {
     let p = req.path.as_str();
     match (req.method.as_str(), p) {
         ("HEAD", _) => {
@@ -177,41 +189,114 @@ fn answer(s: &mut TcpStream, req: &Req) -> bool {
     true
 }
 
-/// A server on a port of its own, each connection on a thread.
-fn server() -> u16 {
+/// Answers a connection's requests until it is to be closed.
+fn serve<S: Read + Write>(s: S) {
+    let mut r = BufReader::new(s);
+    while let Some(req) = read_req(&mut r) {
+        if !answer(r.get_mut(), &req) {
+            break;
+        }
+    }
+}
+
+/// A server on a port of its own, each connection on a thread; over TLS
+/// with `tls`.
+fn server(tls: Option<Arc<SslAcceptor>>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
         for s in listener.incoming() {
-            let Ok(mut s) = s else { continue };
+            let Ok(s) = s else { continue };
+            let tls = tls.clone();
             thread::spawn(move || {
-                let mut r = BufReader::new(s.try_clone().unwrap());
-                while let Some(req) = read_req(&mut r) {
-                    if !answer(&mut s, &req) {
-                        break;
+                let tcp = s.try_clone().unwrap();
+                match tls {
+                    Some(acceptor) => {
+                        if let Ok(s) = acceptor.accept(s) {
+                            serve(s);
+                        }
                     }
+                    None => serve(s),
                 }
-                let _ = s.shutdown(Shutdown::Both);
+                let _ = tcp.shutdown(Shutdown::Both);
             });
         }
     });
     port
 }
 
-/// tests/fetch/app.ts in a directory of its own, for the server on `port`.
-fn program(port: u16, dir: &std::path::Path) -> std::path::PathBuf {
+fn key() -> PKey<Private> {
+    PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap()
+}
+
+/// A certificate for `cn`, valid for localhost and 127.0.0.1, signed by
+/// `issuer` (itself if None; a CA's if `ca`).
+fn certificate(cn: &str, key: &PKey<Private>, issuer: Option<(&X509, &PKey<Private>)>, ca: bool) -> X509 {
+    let mut name = X509NameBuilder::new().unwrap();
+    name.append_entry_by_text("CN", cn).unwrap();
+    let name = name.build();
+    let mut b = X509::builder().unwrap();
+    b.set_version(2).unwrap();
+    let mut serial = BigNum::new().unwrap();
+    serial.rand(64, MsbOption::MAYBE_ZERO, false).unwrap();
+    b.set_serial_number(&serial.to_asn1_integer().unwrap()).unwrap();
+    b.set_subject_name(&name).unwrap();
+    b.set_issuer_name(issuer.map_or(&name, |(c, _)| c.subject_name())).unwrap();
+    b.set_pubkey(key).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(30).unwrap()).unwrap();
+    if ca {
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
+    } else {
+        let san = SubjectAlternativeName::new().dns("localhost").ip("127.0.0.1").build(&b.x509v3_context(issuer.map(|(c, _)| &**c), None)).unwrap();
+        b.append_extension(san).unwrap();
+    }
+    b.sign(issuer.map_or(key, |(_, k)| k), MessageDigest::sha256()).unwrap();
+    b.build()
+}
+
+fn acceptor(cert: &X509, key: &PKey<Private>) -> Arc<SslAcceptor> {
+    let mut a = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
+    a.set_certificate(cert).unwrap();
+    a.set_private_key(key).unwrap();
+    Arc::new(a.build())
+}
+
+/// The servers: plain, over TLS with a certificate of a CA (whose PEM is
+/// returned), and over TLS with a self-signed certificate.
+fn servers() -> (u16, u16, u16, String) {
+    let ca_key = key();
+    let ca = certificate("Beyond Test CA", &ca_key, None, true);
+    let leaf_key = key();
+    let leaf = certificate("localhost", &leaf_key, Some((&ca, &ca_key)), false);
+    let self_key = key();
+    let selfsigned = certificate("localhost", &self_key, None, false);
+    let plain = server(None);
+    let tls = server(Some(acceptor(&leaf, &leaf_key)));
+    let selfp = server(Some(acceptor(&selfsigned, &self_key)));
+    (plain, tls, selfp, String::from_utf8(ca.to_pem().unwrap()).unwrap())
+}
+
+/// tests/fetch/app.ts in a directory of its own, for the servers.
+fn program(dir: &std::path::Path) -> std::path::PathBuf {
+    let (port, tls, selfp, ca) = servers();
     let text = std::fs::read_to_string(common::test_file("fetch/app.ts")).unwrap();
+    let ca = format!("{ca:?}");
+    let text = text
+        .replace("__PORT__", &port.to_string())
+        .replace("__TLS_PORT__", &tls.to_string())
+        .replace("__SELF_PORT__", &selfp.to_string())
+        .replace("__CA__", &ca);
     let app = dir.join("app.ts");
-    std::fs::write(&app, text.replace("__PORT__", &port.to_string())).unwrap();
+    std::fs::write(&app, text).unwrap();
     app
 }
 
 #[test]
 fn fetch() {
-    let port = server();
     let dir = common::tempdir("fetch");
     let exe = dir.join("app");
-    common::build(&program(port, &dir), &exe);
+    common::build(&program(&dir), &exe);
     let out = Command::new(&exe).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     let expected = std::fs::read_to_string(common::test_file("fetch/app.out")).unwrap();
@@ -223,9 +308,8 @@ fn fetch() {
 #[test]
 #[ignore]
 fn fetch_bun() {
-    let port = server();
     let dir = common::tempdir("fetch-bun");
-    let out = Command::new("bun").arg(program(port, &dir)).output().unwrap();
+    let out = Command::new("bun").arg(program(&dir)).output().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::write(common::test_file("fetch/app.out"), &out.stdout).unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));

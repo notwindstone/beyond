@@ -20,6 +20,15 @@ uSockets and uWebSockets, as forked by Bun
   (https://github.com/uNetworking/uSockets, https://github.com/uNetworking/uWebSockets)
   Copyright (c) Alex Hultman and contributors. Apache License 2.0.
 
+Mozilla's root certificates (NSS certdata.txt)
+  Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/). Bun's bundle of
+  them (vendor/bun-usockets/root_certs.der, with the certdata.txt it is made
+  from), which fetch() trusts by default and each program embeds.
+
+OpenSSL (https://www.openssl.org)
+  Copyright (c) The OpenSSL Project Authors. Apache License 2.0. Linked
+  (the system's libssl and libcrypto) for fetch()'s TLS.
+
 picohttpparser (https://github.com/h2o/picohttpparser)
   Copyright (c) 2009-2014 Kazuho Oku, Tokuhiro Matsuno, Daisuke Murase,
   Shigeo Mitsunari. MIT License (vendor/picohttpparser).

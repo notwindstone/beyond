@@ -101,8 +101,9 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
             e.globals.push((name.to_string(), format!("beyond:{spec}")));
         }
     }
-    // (What the Rust standard library, uWebSockets, zlib and Brotli need.)
-    for l in ["-lstdc++", "-lz", "-lbrotlidec", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
+    // (What the Rust standard library, uWebSockets, zlib, Brotli and OpenSSL
+    // need.)
+    for l in ["-lstdc++", "-lz", "-lbrotlidec", "-lssl", "-lcrypto", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
         e.link.push(l.into());
     }
     Ok(())

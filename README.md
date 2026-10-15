@@ -41,8 +41,8 @@ target/release/beyond run app.ts
 ```
 
 `beyond build app.ts -o app` writes the executable. Needs clang (Bun's
-networking code uses its extensions), zlib and brotli's decoder
-(libbrotlidec).
+networking code uses its extensions), zlib, brotli's decoder
+(libbrotlidec) and OpenSSL 3 (libssl, libcrypto).
 
 ## Status
 
@@ -62,7 +62,12 @@ networking code uses its extensions), zlib and brotli's decoder
   does); a stream that fails midway closes the connection. `server.port`,
   `server.url`, `server.stop()`.
 - `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
-  picohttpparser), keep-alive connections pooled per host, bodies decoded
+  picohttpparser), over TLS for `https:` (OpenSSL, on the socket through
+  memory BIOs; Bun's bundled Mozilla root certificates trusted, with
+  `NODE_EXTRA_CA_CERTS`; `tls: { ca, rejectUnauthorized, serverName }`;
+  the certificate checked after the handshake, then the name, with Bun's
+  errors: `DEPTH_ZERO_SELF_SIGNED_CERT`, `ERR_TLS_CERT_ALTNAME_INVALID`,
+  `EPROTO`, ...), keep-alive connections pooled per host, bodies decoded
   (gzip, deflate, br, zstd), redirects followed (`redirect: "follow"`,
   `"manual"`, `"error"`; 303, and 301/302 of a POST, as a GET), and an
   `AbortSignal` aborting the request or the body being read. The response's
@@ -123,11 +128,12 @@ The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT
 URL data and streams tests, a server answering over TCP, and `fetch()`
 against a server of the test's own.
 
-Not yet: TLS (so `fetch` of `https:` URLs), HTTP/2, WebSockets,
-`crypto.subtle`, request bodies as they arrive (on the server, and sent by
-`fetch`: they are read whole first), TextDecoder's
-legacy encodings but windows-1252; errors print without Bun's source
-excerpt, and their stacks' lines are the bundle's.
+Not yet: TLS for `Beyond.serve`, client certificates and
+`checkServerIdentity` for `fetch`, HTTP/2, WebSockets, `crypto.subtle`,
+request bodies as they arrive (on the server, and sent by `fetch`: they are
+read whole first), TextDecoder's legacy encodings but windows-1252; errors
+print without Bun's source excerpt, and their stacks' lines are the
+bundle's.
 
 ## Performance
 
@@ -177,6 +183,10 @@ read with `text()` (bench/fetch.ts), three rounds a run, two runs each:
 Beyond's client does about 90% more fetches a second than Bun's one at a
 time, 70% more with 10 in flight and 28% more with 50, on one thread (Bun
 gives its client a thread of its own), at a peak of 22 MB (Bun: 32 MB).
+Over TLS (against a `Bun.serve` with a certificate), it does about twice
+as many one at a time (17,500 a second; Bun: 9,200), and as many with 50 in
+flight (about 65,000, where the server is the limit) in 57% of the CPU
+time.
 A fetch of a small response went from about 77,000 instructions to about
 15,000:
 

@@ -14,3 +14,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 luminous-cli = { path = "../../vendor/luminous/crates/luminous-cli" }
 luminous-front = { path = "../../vendor/luminous/crates/luminous-front" }
+
+[dev-dependencies]
+# (A TLS server of the fetch test's own, and its certificates.)
+openssl = "0.10"

@@ -6,6 +6,14 @@
 
 mod encoding;
 
+/// Bun's bundled root certificates (Mozilla's, for TLS servers), which
+/// fetch() trusts by default: client.c reads them.
+const ROOT_CERTS: &[u8] = include_bytes!("../../../vendor/bun-usockets/root_certs.der");
+#[unsafe(no_mangle)]
+pub static BEYOND_ROOT_CERTS: [u8; ROOT_CERTS.len()] = *include_bytes!("../../../vendor/bun-usockets/root_certs.der");
+#[unsafe(no_mangle)]
+pub static BEYOND_ROOT_CERTS_LEN: usize = ROOT_CERTS.len();
+
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};

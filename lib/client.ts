@@ -1,4 +1,4 @@
-// fetch(), as Bun's: HTTP/1.1 over the native client
+// fetch(), as Bun's: HTTP/1.1, over TLS for https:, on the native client
 // (crates/beyond-rt/native/client.c), which pools keep-alive connections
 // and decodes gzip, deflate, br and zstd. A response that arrives whole with
 // its head (most do) is handed over at once, its body stored as bytes;
@@ -7,7 +7,7 @@
 // unless `redirect` says otherwise; an AbortSignal aborts the request, or
 // the body being read.
 
-import { encodeUtf8, fetchAbort, fetchInit, fetchPause, fetchRequest, promiseNew, promiseSettle } from "beyond:native";
+import { decodeUtf8, encodeUtf8, fetchAbort, fetchInit, fetchPause, fetchRequest, promiseNew, promiseSettle } from "beyond:native";
 import { Headers, Incoming, Request, Response } from "./fetch.ts";
 import { URL } from "./url.ts";
 
@@ -21,6 +21,108 @@ const EV_COMPLETE = 5;
 // resolving the host.
 const FAIL_CONNECT = 1;
 const FAIL_DNS = 2;
+const FAIL_TLS = 3;
+const FAIL_CERT = 4;
+
+// Bun's messages for certificate errors (FetchTasklet.rs).
+const CERT_MESSAGES: Record<string, string> = {
+  UNABLE_TO_GET_ISSUER_CERT: "unable to get issuer certificate",
+  UNABLE_TO_GET_CRL: "unable to get certificate CRL",
+  UNABLE_TO_DECRYPT_CERT_SIGNATURE: "unable to decrypt certificate's signature",
+  UNABLE_TO_DECRYPT_CRL_SIGNATURE: "unable to decrypt CRL's signature",
+  UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: "unable to decode issuer public key",
+  CERT_SIGNATURE_FAILURE: "certificate signature failure",
+  CRL_SIGNATURE_FAILURE: "CRL signature failure",
+  CERT_NOT_YET_VALID: "certificate is not yet valid",
+  CRL_NOT_YET_VALID: "CRL is not yet valid",
+  CERT_HAS_EXPIRED: "certificate has expired",
+  CRL_HAS_EXPIRED: "CRL has expired",
+  ERROR_IN_CERT_NOT_BEFORE_FIELD: "format error in certificate's notBefore field",
+  ERROR_IN_CERT_NOT_AFTER_FIELD: "format error in certificate's notAfter field",
+  ERROR_IN_CRL_LAST_UPDATE_FIELD: "format error in CRL's lastUpdate field",
+  ERROR_IN_CRL_NEXT_UPDATE_FIELD: "format error in CRL's nextUpdate field",
+  OUT_OF_MEM: "out of memory",
+  DEPTH_ZERO_SELF_SIGNED_CERT: "self signed certificate",
+  SELF_SIGNED_CERT_IN_CHAIN: "self signed certificate in certificate chain",
+  UNABLE_TO_GET_ISSUER_CERT_LOCALLY: "unable to get local issuer certificate",
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: "unable to verify the first certificate",
+  CERT_CHAIN_TOO_LONG: "certificate chain too long",
+  CERT_REVOKED: "certificate revoked",
+  INVALID_CA: "invalid CA certificate",
+  INVALID_NON_CA: "invalid non-CA certificate (has CA markings)",
+  PATH_LENGTH_EXCEEDED: "path length constraint exceeded",
+  PROXY_PATH_LENGTH_EXCEEDED: "proxy path length constraint exceeded",
+  PROXY_CERTIFICATES_NOT_ALLOWED: "proxy certificates not allowed, please set the appropriate flag",
+  INVALID_PURPOSE: "unsupported certificate purpose",
+  CERT_UNTRUSTED: "certificate not trusted",
+  CERT_REJECTED: "certificate rejected",
+  APPLICATION_VERIFICATION: "application verification failure",
+  SUBJECT_ISSUER_MISMATCH: "subject issuer mismatch",
+  AKID_SKID_MISMATCH: "authority and subject key identifier mismatch",
+  AKID_ISSUER_SERIAL_MISMATCH: "authority and issuer serial number mismatch",
+  KEYUSAGE_NO_CERTSIGN: "key usage does not include certificate signing",
+  UNABLE_TO_GET_CRL_ISSUER: "unable to get CRL issuer certificate",
+  UNHANDLED_CRITICAL_EXTENSION: "unhandled critical extension",
+  KEYUSAGE_NO_CRL_SIGN: "key usage does not include CRL signing",
+  KEYUSAGE_NO_DIGITAL_SIGNATURE: "key usage does not include digital signature",
+  UNHANDLED_CRITICAL_CRL_EXTENSION: "unhandled critical CRL extension",
+  INVALID_EXTENSION: "invalid or inconsistent certificate extension",
+  INVALID_POLICY_EXTENSION: "invalid or inconsistent certificate policy extension",
+  NO_EXPLICIT_POLICY: "no explicit policy",
+  DIFFERENT_CRL_SCOPE: "Different CRL scope",
+  UNSUPPORTED_EXTENSION_FEATURE: "Unsupported extension feature",
+  UNNESTED_RESOURCE: "RFC 3779 resource not subset of parent's resources",
+  PERMITTED_VIOLATION: "permitted subtree violation",
+  EXCLUDED_VIOLATION: "excluded subtree violation",
+  SUBTREE_MINMAX: "name constraints minimum and maximum not supported",
+  UNSUPPORTED_CONSTRAINT_TYPE: "unsupported name constraint type",
+  UNSUPPORTED_CONSTRAINT_SYNTAX: "unsupported or invalid name constraint syntax",
+  UNSUPPORTED_NAME_SYNTAX: "unsupported or invalid name syntax",
+  CRL_PATH_VALIDATION_ERROR: "CRL path validation error",
+  SUITE_B_INVALID_VERSION: "Suite B: certificate version invalid",
+  SUITE_B_INVALID_ALGORITHM: "Suite B: invalid public key algorithm",
+  SUITE_B_INVALID_CURVE: "Suite B: invalid ECC curve",
+  SUITE_B_INVALID_SIGNATURE_ALGORITHM: "Suite B: invalid signature algorithm",
+  SUITE_B_LOS_NOT_ALLOWED: "Suite B: curve not allowed for this LOS",
+  SUITE_B_CANNOT_SIGN_P_384_WITH_P_256: "Suite B: cannot sign P-384 with P-256",
+  EMAIL_MISMATCH: "Email address mismatch",
+  IP_ADDRESS_MISMATCH: "IP address mismatch",
+  INVALID_CALL: "Invalid certificate verification context",
+  STORE_LOOKUP: "Issuer certificate lookup error",
+  UNKNOWN_CERTIFICATE_VERIFICATION_ERROR: "unknown certificate verification error",
+};
+
+/** A TLS connection's options, as client.c takes them. */
+interface TLSConfig {
+  // The certificates to trust (PEM), or null for Bun's bundled roots.
+  ca: string | null;
+  // Whether to check the server's certificate (undefined: as
+  // NODE_TLS_REJECT_UNAUTHORIZED says, else yes).
+  reject: boolean | undefined;
+  // The name to send and check, if not the host.
+  servername: string | null;
+}
+
+const DEFAULT_TLS: TLSConfig = { ca: null, reject: undefined, servername: null };
+
+/** PEM text of a `ca` option: a string, bytes, or an array of them. */
+function pemOf(ca: unknown): string {
+  if (Array.isArray(ca)) return ca.map(pemOf).join("\n");
+  if (typeof ca === "string") return ca;
+  if (ca instanceof Uint8Array) return decodeUtf8(ca, false);
+  if (ca instanceof ArrayBuffer) return decodeUtf8(new Uint8Array(ca), false);
+  return String(ca);
+}
+
+/** fetch()'s `tls` option, as client.c takes it. */
+function tlsConfig(tls: any): TLSConfig {
+  if (tls === undefined || tls === null) return DEFAULT_TLS;
+  return {
+    ca: tls.ca === undefined || tls.ca === null ? null : pemOf(tls.ca),
+    reject: tls.rejectUnauthorized === undefined ? undefined : Boolean(tls.rejectUnauthorized),
+    servername: typeof tls.serverName === "string" ? tls.serverName : typeof tls.servername === "string" ? tls.servername : null,
+  };
+}
 
 const USER_AGENT = "Beyond/0.1.0";
 
@@ -43,6 +145,7 @@ export interface FetchInit {
   body?: any;
   redirect?: "follow" | "manual" | "error";
   signal?: AbortSignal | null;
+  tls?: { rejectUnauthorized?: boolean; ca?: unknown; serverName?: string };
   [key: string]: unknown;
 }
 
@@ -63,7 +166,7 @@ class Target {
     this.protocol = url.protocol;
     const h = url.hostname;
     this.host = h.startsWith("[") ? h.slice(1, -1) : h;
-    this.port = url.port === "" ? 80 : Number(url.port);
+    this.port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
   }
 }
 
@@ -124,6 +227,7 @@ class Fetch {
   body: Uint8Array | null;
   redirect: string;
   signal: AbortSignal | null;
+  tls: TLSConfig;
   // The promise fetch() returned (settled by `resolve` and `reject`).
   promise: Promise<Response> | null = null;
   redirects = 0;
@@ -140,6 +244,7 @@ class Fetch {
     body: Uint8Array | null,
     redirect: string,
     signal: AbortSignal | null,
+    tls: TLSConfig,
   ) {
     this.target = target;
     this.method = method;
@@ -147,6 +252,7 @@ class Fetch {
     this.body = body;
     this.redirect = redirect;
     this.signal = signal;
+    this.tls = tls;
   }
 
   /** Sends the request; the promise of its response. */
@@ -178,7 +284,7 @@ class Fetch {
     } else {
       bytes = head(method, t.url, this.headers, body === null ? 0 : body.length);
     }
-    this.handle = fetchRequest(this, t.host, t.port, bytes, body, method === "HEAD");
+    this.handle = fetchRequest(this, t.host, t.port, bytes, body, method === "HEAD", t.protocol === "https:" ? this.tls : null);
   }
 
   resolve(r: Response): void {
@@ -290,6 +396,8 @@ class Fetch {
       extra = { path, syscall: "getaddrinfo", hostname, errno: 4 };
     } else {
       if (kind === FAIL_CONNECT) message = `${code}: Unable to connect. Is the computer able to access the url?`;
+      else if (kind === FAIL_TLS) message = `${code}: The TLS handshake failed. Does the server speak TLS on this port?`;
+      else if (kind === FAIL_CERT) message = CERT_MESSAGES[code] ?? CERT_MESSAGES.UNKNOWN_CERTIFICATE_VERIFICATION_ERROR;
       else if (code === "ECONNRESET") {
         message = `${code}: The socket connection was closed unexpectedly. For more information, pass \`verbose: true\` in the second argument to fetch()`;
       } else message = failedMessage(code, path);
@@ -345,8 +453,7 @@ function targetOf(s: string): Target {
     throw fetchError("fetch() URL is invalid", "ERR_INVALID_URL");
   }
   const protocol = t.protocol;
-  if (protocol === "http:") return t;
-  if (protocol === "https:") throw fetchError("https: is not supported yet", "ERR_INVALID_ARG_VALUE");
+  if (protocol === "http:" || protocol === "https:") return t;
   throw fetchError("protocol must be http:, https: or s3:", "ERR_INVALID_ARG_VALUE");
 }
 
@@ -359,7 +466,7 @@ export function fetch(input: string | URL | Request, init?: FetchInit): Promise<
     } catch (e) {
       return Promise.reject(e);
     }
-    return new Fetch(t, "GET", null, null, "follow", null).start();
+    return new Fetch(t, "GET", null, null, "follow", null, DEFAULT_TLS).start();
   }
   let req: Request;
   let t: Target;
@@ -372,11 +479,12 @@ export function fetch(input: string | URL | Request, init?: FetchInit): Promise<
   const signal = init?.signal ?? null;
   if (signal !== null && signal.aborted) return Promise.reject(signal.reason);
   const redirect = init?.redirect ?? "follow";
+  const tls = tlsConfig(init?.tls);
   // (Copied: redirects change them.)
   const headers = req._headers === null && req._flat === null ? null : new Headers(req.headers);
   if (req._body === null && req._stream === null) {
-    return new Fetch(t, req.method, headers, null, redirect, signal).start();
+    return new Fetch(t, req.method, headers, null, redirect, signal, tls).start();
   }
   // The request's body, read whole.
-  return req.bytes().then((bytes) => new Fetch(t, req.method, headers, bytes, redirect, signal).start());
+  return req.bytes().then((bytes) => new Fetch(t, req.method, headers, bytes, redirect, signal, tls).start());
 }

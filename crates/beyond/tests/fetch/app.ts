@@ -2,7 +2,11 @@
 // what each case gives, URLs without the server's address. The output is
 // Bun's (app.out).
 const B = "http://127.0.0.1:__PORT__";
-const strip = (s: string | null) => (s === null ? s : s.replace(B, "B"));
+const S = "https://127.0.0.1:__TLS_PORT__";
+const SELF = "https://127.0.0.1:__SELF_PORT__";
+const ca = __CA__;
+const HB = B.replace("http:", "https:");
+const strip = (s: string | null) => (s === null ? s : s.replace(S, "S").replace(SELF, "SELF").replace(HB, "HB").replace(B, "B"));
 const show = async (label: string, f: () => any) => {
   try {
     console.log(label, await f());
@@ -119,6 +123,25 @@ await show("cancel body", async () => {
 });
 await show("parallel", async () => (await Promise.all([1, 2, 3, 4, 5].map(() => fetch(B + "/").then((r) => r.text())))).join("|"));
 await show("server closed", async () => [await (await fetch(B + "/bye")).text(), await (await fetch(B + "/")).text()]);
+
+// TLS.
+await show("https", async () => (await fetch(S + "/", { tls: { ca } })).text());
+await show("https localhost", async () => (await fetch(`https://localhost:__TLS_PORT__/final`, { tls: { ca } })).text());
+await show("https redirect", async () => {
+  const r = await fetch(S + "/redir", { tls: { ca } });
+  return [r.status, strip(r.url), r.redirected, await r.text()];
+});
+await show("https gzip", async () => (await (await fetch(S + "/gzip", { tls: { ca } })).text()).length);
+await show("https chunked", async () => (await (await fetch(S + "/chunked", { tls: { ca } })).text()).length);
+await show("https big", async () => (await (await fetch(S + "/big", { tls: { ca } })).arrayBuffer()).byteLength);
+await show("https post", async () => (await fetch(S + "/echo", { method: "POST", body: "over tls", tls: { ca } })).text());
+await show("https parallel", async () => (await Promise.all([1, 2, 3].map(() => fetch(S + "/", { tls: { ca: [ca] } }).then((r) => r.text())))).join("|"));
+await show("https unchecked", async () => (await fetch(S + "/", { tls: { rejectUnauthorized: false } })).text());
+await show("https unknown ca", () => fetch(S + "/"));
+await show("https self-signed", () => fetch(SELF + "/"));
+await show("https self-signed unchecked", async () => (await fetch(SELF + "/", { tls: { rejectUnauthorized: false } })).text());
+await show("https wrong name", () => fetch(S + "/", { tls: { ca, serverName: "example.com" } }));
+await show("https to http", () => fetch(HB + "/"));
 
 // Errors.
 await show("refused", () => fetch("http://127.0.0.1:1/"));

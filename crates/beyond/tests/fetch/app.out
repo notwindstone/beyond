@@ -40,6 +40,20 @@ abort before head threw DOMException "The operation was aborted." 20 AbortError 
 cancel body canceled
 parallel hello keep-alive|hello keep-alive|hello keep-alive|hello keep-alive|hello keep-alive
 server closed [ "bye", "hello keep-alive" ]
+https hello keep-alive
+https localhost final /final
+https redirect [ 200, "S/final?x=1", true, "final /final?x=1" ]
+https gzip 1100
+https chunked 70005
+https big 8388608
+https post POST over tls
+https parallel hello keep-alive|hello keep-alive|hello keep-alive
+https unchecked hello keep-alive
+https unknown ca threw TypeError "unable to verify the first certificate" UNABLE_TO_VERIFY_LEAF_SIGNATURE TypeError 0 S/ undefined undefined
+https self-signed threw TypeError "self signed certificate" DEPTH_ZERO_SELF_SIGNED_CERT TypeError 0 SELF/ undefined undefined
+https self-signed unchecked hello keep-alive
+https wrong name threw TypeError "ERR_TLS_CERT_ALTNAME_INVALID fetching \"S/\". For more information, pass `verbose: true` in the second argument to fetch()" ERR_TLS_CERT_ALTNAME_INVALID TypeError 0 S/ undefined undefined
+https to http threw TypeError "ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" ECONNRESET TypeError 0 HB/ undefined undefined
 refused threw TypeError "ECONNREFUSED: Unable to connect. Is the computer able to access the url?" ECONNREFUSED TypeError 0 http://127.0.0.1:1/ undefined undefined
 reset threw TypeError "ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" ECONNRESET TypeError 0 B/reset undefined undefined
 garbage threw TypeError "Malformed_HTTP_Response fetching \"B/garbage\". For more information, pass `verbose: true` in the second argument to fetch()" Malformed_HTTP_Response TypeError 0 B/garbage undefined undefined

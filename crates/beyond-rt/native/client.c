@@ -1,5 +1,6 @@
 // fetch()'s HTTP client: HTTP/1.1 requests over Bun's uSockets, as Bun's
-// client (src/http) does them, reduced. Each request gets a connection (an
+// client (src/http) does them, reduced; over TLS (OpenSSL, through memory
+// BIOs on the plain socket) for https:. Each request gets a connection (an
 // idle keep-alive one to the same host and port, else a new one), writes
 // its bytes, and has the response parsed with picohttpparser: its head, then
 // its body, unframed (Content-Length, chunked, or until the connection
@@ -12,6 +13,7 @@
 // in the pool first.
 
 #define _GNU_SOURCE
+#include <arpa/inet.h>
 #include <brotli/decode.h>
 #include <errno.h>
 #include <netdb.h>
@@ -22,6 +24,11 @@
 #include <string.h>
 #include <strings.h>
 #include <zlib.h>
+
+#include <openssl/err.h>
+#include <openssl/pem.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
 
 #include "libusockets.h"
 #include "picohttpparser.h"
@@ -40,7 +47,7 @@ enum { EV_HEAD = 1, EV_DATA = 2, EV_END = 3, EV_ERROR = 4, EV_COMPLETE = 5 };
 enum { R_CONNECT, R_HEAD, R_BODY, R_DONE };
 enum { ENC_NONE, ENC_GZIP, ENC_DEFLATE, ENC_BR, ENC_ZSTD };
 
-#define KEY_MAX 300
+#define KEY_MAX 600
 
 typedef struct {
     uint32_t gen;
@@ -51,6 +58,11 @@ typedef struct {
     char host[256];
     int port;
     char key[KEY_MAX];
+    // https: its TLS context (a reference), whether certificates are
+    // checked, and the name to check (and send) if not the host.
+    SSL_CTX *tls;
+    bool reject;
+    char servername[256];
     // The request's bytes, and how many are written (the buffers are kept
     // for the slot's next request).
     char *out;
@@ -85,9 +97,15 @@ typedef struct {
     uint32_t next_free;
 } Req;
 
-// The socket's ext: its request, or -1 when idle in the pool.
+// The socket's ext: its request (-1 when idle in the pool), and over TLS
+// its session, whether the handshake is done, and the ciphertext the socket
+// has not taken yet.
 typedef struct {
     int32_t req;
+    SSL *ssl;
+    bool handshaken;
+    char *pend;
+    size_t pend_len, pend_cap;
 } Ext;
 
 static Req **reqs;
@@ -170,6 +188,10 @@ static void req_free(uint32_t i) {
     if (!r->live)
         return;
     r->task = r->status_text = r->flat = JS_UNDEFINED;
+    if (r->tls) {
+        SSL_CTX_free(r->tls);
+        r->tls = NULL;
+    }
     if (r->out_cap > KEEP_BUFFER) {
         free(r->out);
         r->out = NULL, r->out_cap = 0;
@@ -235,9 +257,9 @@ static bool emit(uint32_t i, int argc, JSValue *argv) {
 static Ext *ext_of(struct us_socket_t *s) { return us_socket_ext(s); }
 
 // What kind of failure an error is (its message is made in JavaScript, as
-// Bun's are): one of the connection's or the response's, connecting, or
-// resolving the host.
-enum { FAIL_OTHER = 0, FAIL_CONNECT = 1, FAIL_DNS = 2 };
+// Bun's are): one of the connection's or the response's, connecting,
+// resolving the host, the TLS handshake, or the server's certificate.
+enum { FAIL_OTHER = 0, FAIL_CONNECT = 1, FAIL_DNS = 2, FAIL_TLS = 3, FAIL_CERT = 4 };
 
 // Ends the request with an error (the connection closed): ERROR, its code
 // and kind.
@@ -625,13 +647,382 @@ static void response_data(uint32_t i, char *data, size_t len) {
 
 // ---- The connection's events ----
 
+// ---- TLS ----
+
+// Bun's bundled root certificates (vendor/bun-usockets/root_certs.der, as
+// Bun embeds them): a u32 count, count + 1 u32 offsets, the DER
+// certificates; little-endian.
+extern const uint8_t BEYOND_ROOT_CERTS[];
+extern const size_t BEYOND_ROOT_CERTS_LEN;
+
+static uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+
+static void add_bundled_roots(X509_STORE *store) {
+    const uint8_t *d = BEYOND_ROOT_CERTS;
+    if (BEYOND_ROOT_CERTS_LEN < 4)
+        return;
+    uint32_t count = le32(d);
+    const uint8_t *base = d + 4 + 4 * ((size_t)count + 1);
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t off = le32(d + 4 + 4 * k), end = le32(d + 8 + 4 * k);
+        const uint8_t *p = base + off;
+        X509 *x = d2i_X509(NULL, &p, end - off);
+        if (x) {
+            X509_STORE_add_cert(store, x);
+            X509_free(x);
+        }
+    }
+}
+
+// The certificates of PEM text: how many were added.
+static int add_pem(X509_STORE *store, const char *pem, size_t len) {
+    BIO *b = BIO_new_mem_buf(pem, (int)len);
+    int n = 0;
+    X509 *x;
+    while ((x = PEM_read_bio_X509(b, NULL, NULL, NULL))) {
+        X509_STORE_add_cert(store, x);
+        X509_free(x);
+        n++;
+    }
+    ERR_clear_error();
+    BIO_free(b);
+    return n;
+}
+
+// NODE_EXTRA_CA_CERTS's file, added to the bundled roots (as Bun's).
+static void add_extra_ca_file(X509_STORE *store) {
+    const char *f = getenv("NODE_EXTRA_CA_CERTS");
+    if (!f || !*f)
+        return;
+    FILE *fp = fopen(f, "rb");
+    if (!fp) {
+        fprintf(stderr, "Warning: ignoring extra certs from `%s`, load failed: %s\n", f, strerror(errno));
+        return;
+    }
+    char *text = NULL;
+    size_t len = 0, cap = 0, n;
+    char chunk[65536];
+    while ((n = fread(chunk, 1, sizeof chunk, fp)) > 0) {
+        if (!reserve((uint8_t **)&text, &cap, len + n))
+            break;
+        memcpy(text + len, chunk, n);
+        len += n;
+    }
+    fclose(fp);
+    if (text)
+        add_pem(store, text, len);
+    free(text);
+}
+
+// TLS contexts: the default one (the bundled roots), and one for each
+// recent `tls.ca` (its certificates alone, as Node's and Bun's `ca`).
+// Each has an id, which the pool's keys name.
+#define MAX_TLS_CTX 16
+typedef struct {
+    char *ca; // NULL: the default
+    size_t ca_len;
+    SSL_CTX *ctx;
+    uint32_t id;
+} TlsCtx;
+static TlsCtx tls_ctxs[MAX_TLS_CTX];
+static int ntls_ctxs, next_tls_ctx;
+static uint32_t tls_ctx_ids;
+
+// The context for `ca` (NULL: the default), a new reference; NULL if it
+// cannot be made.
+static SSL_CTX *tls_ctx(const char *ca, size_t ca_len, uint32_t *id) {
+    for (int k = 0; k < ntls_ctxs; k++) {
+        TlsCtx *t = &tls_ctxs[k];
+        if ((ca == NULL) == (t->ca == NULL) && (!ca || (t->ca_len == ca_len && !memcmp(t->ca, ca, ca_len)))) {
+            SSL_CTX_up_ref(t->ctx);
+            *id = t->id;
+            return t->ctx;
+        }
+    }
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx)
+        return NULL;
+    X509_STORE *store = X509_STORE_new();
+    if (ca) {
+        add_pem(store, ca, ca_len);
+    } else {
+        add_bundled_roots(store);
+        add_extra_ca_file(store);
+    }
+    SSL_CTX_set_cert_store(ctx, store);
+    // (Checked after the handshake, as Bun does, for its errors.)
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    SSL_CTX_set_alpn_protos(ctx, (const unsigned char *)"\x08http/1.1", 9);
+    // (The default context is kept for good; one of `ca` until 16 more
+    // are made.)
+    int k;
+    if (ntls_ctxs < MAX_TLS_CTX) {
+        k = ntls_ctxs++;
+    } else {
+        k = 1 + next_tls_ctx++ % (MAX_TLS_CTX - 1);
+        SSL_CTX_free(tls_ctxs[k].ctx);
+        free(tls_ctxs[k].ca);
+    }
+    TlsCtx *t = &tls_ctxs[k];
+    t->ca = NULL;
+    t->ca_len = ca_len;
+    if (ca) {
+        t->ca = malloc(ca_len ? ca_len : 1);
+        memcpy(t->ca, ca, ca_len);
+    }
+    t->ctx = ctx;
+    t->id = ++tls_ctx_ids;
+    *id = t->id;
+    SSL_CTX_up_ref(ctx);
+    return ctx;
+}
+
+// The names Bun gives certificate errors (OpenSSL's X509_V_ERR_*).
+static const char *cert_error_name(long v) {
+    switch (v) {
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT: return "UNABLE_TO_GET_ISSUER_CERT";
+    case X509_V_ERR_UNABLE_TO_GET_CRL: return "UNABLE_TO_GET_CRL";
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE: return "UNABLE_TO_DECRYPT_CERT_SIGNATURE";
+    case X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE: return "UNABLE_TO_DECRYPT_CRL_SIGNATURE";
+    case X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: return "UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY";
+    case X509_V_ERR_CERT_SIGNATURE_FAILURE: return "CERT_SIGNATURE_FAILURE";
+    case X509_V_ERR_CRL_SIGNATURE_FAILURE: return "CRL_SIGNATURE_FAILURE";
+    case X509_V_ERR_CERT_NOT_YET_VALID: return "CERT_NOT_YET_VALID";
+    case X509_V_ERR_CERT_HAS_EXPIRED: return "CERT_HAS_EXPIRED";
+    case X509_V_ERR_CRL_NOT_YET_VALID: return "CRL_NOT_YET_VALID";
+    case X509_V_ERR_CRL_HAS_EXPIRED: return "CRL_HAS_EXPIRED";
+    case X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD: return "ERROR_IN_CERT_NOT_BEFORE_FIELD";
+    case X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD: return "ERROR_IN_CERT_NOT_AFTER_FIELD";
+    case X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD: return "ERROR_IN_CRL_LAST_UPDATE_FIELD";
+    case X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD: return "ERROR_IN_CRL_NEXT_UPDATE_FIELD";
+    case X509_V_ERR_OUT_OF_MEM: return "OUT_OF_MEM";
+    case X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT: return "DEPTH_ZERO_SELF_SIGNED_CERT";
+    case X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN: return "SELF_SIGNED_CERT_IN_CHAIN";
+    case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY: return "UNABLE_TO_GET_ISSUER_CERT_LOCALLY";
+    case X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE: return "UNABLE_TO_VERIFY_LEAF_SIGNATURE";
+    case X509_V_ERR_CERT_CHAIN_TOO_LONG: return "CERT_CHAIN_TOO_LONG";
+    case X509_V_ERR_CERT_REVOKED: return "CERT_REVOKED";
+    case X509_V_ERR_INVALID_CA: return "INVALID_CA";
+    case X509_V_ERR_PATH_LENGTH_EXCEEDED: return "PATH_LENGTH_EXCEEDED";
+    case X509_V_ERR_INVALID_PURPOSE: return "INVALID_PURPOSE";
+    case X509_V_ERR_CERT_UNTRUSTED: return "CERT_UNTRUSTED";
+    case X509_V_ERR_CERT_REJECTED: return "CERT_REJECTED";
+    case X509_V_ERR_SUBJECT_ISSUER_MISMATCH: return "SUBJECT_ISSUER_MISMATCH";
+    case X509_V_ERR_AKID_SKID_MISMATCH: return "AKID_SKID_MISMATCH";
+    case X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH: return "AKID_ISSUER_SERIAL_MISMATCH";
+    case X509_V_ERR_KEYUSAGE_NO_CERTSIGN: return "KEYUSAGE_NO_CERTSIGN";
+    case X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER: return "UNABLE_TO_GET_CRL_ISSUER";
+    case X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION: return "UNHANDLED_CRITICAL_EXTENSION";
+    case X509_V_ERR_KEYUSAGE_NO_CRL_SIGN: return "KEYUSAGE_NO_CRL_SIGN";
+    case X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION: return "UNHANDLED_CRITICAL_CRL_EXTENSION";
+    case X509_V_ERR_INVALID_NON_CA: return "INVALID_NON_CA";
+    case X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED: return "PROXY_PATH_LENGTH_EXCEEDED";
+    case X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE: return "KEYUSAGE_NO_DIGITAL_SIGNATURE";
+    case X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED: return "PROXY_CERTIFICATES_NOT_ALLOWED";
+    case X509_V_ERR_INVALID_EXTENSION: return "INVALID_EXTENSION";
+    case X509_V_ERR_INVALID_POLICY_EXTENSION: return "INVALID_POLICY_EXTENSION";
+    case X509_V_ERR_NO_EXPLICIT_POLICY: return "NO_EXPLICIT_POLICY";
+    case X509_V_ERR_DIFFERENT_CRL_SCOPE: return "DIFFERENT_CRL_SCOPE";
+    case X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE: return "UNSUPPORTED_EXTENSION_FEATURE";
+    case X509_V_ERR_UNNESTED_RESOURCE: return "UNNESTED_RESOURCE";
+    case X509_V_ERR_PERMITTED_VIOLATION: return "PERMITTED_VIOLATION";
+    case X509_V_ERR_EXCLUDED_VIOLATION: return "EXCLUDED_VIOLATION";
+    case X509_V_ERR_SUBTREE_MINMAX: return "SUBTREE_MINMAX";
+    case X509_V_ERR_APPLICATION_VERIFICATION: return "APPLICATION_VERIFICATION";
+    case X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE: return "UNSUPPORTED_CONSTRAINT_TYPE";
+    case X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX: return "UNSUPPORTED_CONSTRAINT_SYNTAX";
+    case X509_V_ERR_UNSUPPORTED_NAME_SYNTAX: return "UNSUPPORTED_NAME_SYNTAX";
+    case X509_V_ERR_CRL_PATH_VALIDATION_ERROR: return "CRL_PATH_VALIDATION_ERROR";
+    case X509_V_ERR_SUITE_B_INVALID_VERSION: return "SUITE_B_INVALID_VERSION";
+    case X509_V_ERR_SUITE_B_INVALID_ALGORITHM: return "SUITE_B_INVALID_ALGORITHM";
+    case X509_V_ERR_SUITE_B_INVALID_CURVE: return "SUITE_B_INVALID_CURVE";
+    case X509_V_ERR_SUITE_B_INVALID_SIGNATURE_ALGORITHM: return "SUITE_B_INVALID_SIGNATURE_ALGORITHM";
+    case X509_V_ERR_SUITE_B_LOS_NOT_ALLOWED: return "SUITE_B_LOS_NOT_ALLOWED";
+    case X509_V_ERR_SUITE_B_CANNOT_SIGN_P_384_WITH_P_256: return "SUITE_B_CANNOT_SIGN_P_384_WITH_P_256";
+    case X509_V_ERR_EMAIL_MISMATCH: return "EMAIL_MISMATCH";
+    case X509_V_ERR_IP_ADDRESS_MISMATCH: return "IP_ADDRESS_MISMATCH";
+    case X509_V_ERR_INVALID_CALL: return "INVALID_CALL";
+    case X509_V_ERR_STORE_LOOKUP: return "STORE_LOOKUP";
+    default: return "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR";
+    }
+}
+
+static bool is_ip(const char *name) {
+    unsigned char buf[16];
+    return inet_pton(AF_INET, name, buf) == 1 || inet_pton(AF_INET6, name, buf) == 1;
+}
+
+// After the handshake: NULL if the server's certificate is good for the
+// request (or not checked), else the error's code (Bun checks the chain,
+// then the name).
+static const char *tls_check(Req *r, SSL *ssl, int *kind) {
+    if (!r->reject)
+        return NULL;
+    *kind = FAIL_CERT;
+    long v = SSL_get_verify_result(ssl);
+    // (A certificate sent alone whose issuer is unknown: BoringSSL's error,
+    // as Bun reports it, where OpenSSL 3 reports the issuer missing.)
+    if (v == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY) {
+        STACK_OF(X509) *chain = SSL_get_peer_cert_chain(ssl);
+        if (chain && sk_X509_num(chain) == 1)
+            v = X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE;
+    }
+    if (v != X509_V_OK)
+        return cert_error_name(v);
+    X509 *cert = SSL_get1_peer_certificate(ssl);
+    if (!cert)
+        return cert_error_name(X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY);
+    const char *name = r->servername[0] ? r->servername : r->host;
+    int ok = is_ip(name) ? X509_check_ip_asc(cert, name, 0) : X509_check_host(cert, name, strlen(name), 0, NULL);
+    X509_free(cert);
+    if (ok == 1)
+        return NULL;
+    *kind = FAIL_OTHER;
+    return "ERR_TLS_CERT_ALTNAME_INVALID";
+}
+
+// Writes the ciphertext the session has made (and what the socket did not
+// take before) to the socket, keeping what it does not take.
+static void tls_flush(struct us_socket_t *s) {
+    Ext *e = ext_of(s);
+    BIO *wb = SSL_get_wbio(e->ssl);
+    size_t pending = BIO_ctrl_pending(wb);
+    if (pending && reserve((uint8_t **)&e->pend, &e->pend_cap, e->pend_len + pending)) {
+        int n = BIO_read(wb, e->pend + e->pend_len, (int)pending);
+        if (n > 0)
+            e->pend_len += (size_t)n;
+    }
+    size_t off = 0;
+    while (off < e->pend_len) {
+        int n = us_socket_write(s, e->pend + off, (int)(e->pend_len - off));
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    if (off) {
+        memmove(e->pend, e->pend + off, e->pend_len - off);
+        e->pend_len -= off;
+    }
+}
+
+static void write_out(uint32_t i);
+
+// Goes on with the handshake of request i's connection: true once it is
+// done and the certificate good (false: wait, or the request failed).
+static bool tls_handshake(uint32_t i, struct us_socket_t *s) {
+    Ext *e = ext_of(s);
+    int rc = SSL_do_handshake(e->ssl);
+    tls_flush(s);
+    if (rc == 1) {
+        e->handshaken = true;
+        int kind;
+        const char *bad = tls_check(reqs[i], e->ssl, &kind);
+        if (bad) {
+            fail(i, bad, kind);
+            return false;
+        }
+        return true;
+    }
+    int err = SSL_get_error(e->ssl, rc);
+    if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
+        return false;
+    ERR_clear_error();
+    fail(i, "EPROTO", FAIL_TLS);
+    return false;
+}
+
+// A new connection of request i: its TLS session, and the handshake begun.
+static void tls_begin(uint32_t i, struct us_socket_t *s) {
+    Req *r = reqs[i];
+    Ext *e = ext_of(s);
+    SSL *ssl = SSL_new(r->tls);
+    if (!ssl) {
+        fail(i, "EPROTO", FAIL_TLS);
+        return;
+    }
+    SSL_set_bio(ssl, BIO_new(BIO_s_mem()), BIO_new(BIO_s_mem()));
+    SSL_set_connect_state(ssl);
+    const char *name = r->servername[0] ? r->servername : r->host;
+    if (!is_ip(name))
+        SSL_set_tlsext_host_name(ssl, name);
+    e->ssl = ssl;
+    e->handshaken = false;
+    if (tls_handshake(i, s))
+        write_out(i);
+}
+
+static void lost(uint32_t i);
+
+// Ciphertext that came: the handshake's, then the response's plaintext.
+static void tls_data(struct us_socket_t *s, char *data, int length) {
+    Ext *e = ext_of(s);
+    BIO_write(SSL_get_rbio(e->ssl), data, length);
+    if (!e->handshaken) {
+        int32_t i = e->req;
+        if (i < 0 || (uint32_t)i >= nreqs || !reqs[i]->live || reqs[i]->s != s) {
+            us_socket_close(s, 0, NULL);
+            return;
+        }
+        if (!tls_handshake((uint32_t)i, s))
+            return;
+        write_out((uint32_t)i);
+        if (us_socket_is_closed(s))
+            return;
+    }
+    char buf[16384];
+    for (;;) {
+        int n = SSL_read(e->ssl, buf, sizeof buf);
+        if (n > 0) {
+            int32_t i = e->req;
+            if (i < 0) {
+                // (An idle connection the server wrote to: not reusable.)
+                us_socket_close(s, 0, NULL);
+                return;
+            }
+            if ((uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s)
+                response_data((uint32_t)i, buf, (size_t)n);
+            // (The response may have closed it, or the program.)
+            if (us_socket_is_closed(s))
+                return;
+            continue;
+        }
+        if (SSL_get_error(e->ssl, n) == SSL_ERROR_WANT_READ)
+            break;
+        // (The server closed the session, or it failed: the connection is
+        // done.)
+        ERR_clear_error();
+        int32_t i = e->req;
+        e->req = -1;
+        idle_remove(s);
+        us_socket_close(s, 0, NULL);
+        if (i >= 0 && (uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s)
+            lost((uint32_t)i);
+        return;
+    }
+    tls_flush(s);
+}
+
+// ---- The connection's events ----
+
 static void write_out(uint32_t i) {
     Req *r = reqs[i];
-    while (r->out_off < r->out_len) {
-        int n = us_socket_write(r->s, r->out + r->out_off, (int)(r->out_len - r->out_off));
-        if (n <= 0)
+    Ext *e = ext_of(r->s);
+    if (e->ssl) {
+        if (!e->handshaken)
             return;
-        r->out_off += (size_t)n;
+        // (A memory BIO takes it all.)
+        if (r->out_off < r->out_len) {
+            SSL_write(e->ssl, r->out + r->out_off, (int)(r->out_len - r->out_off));
+            r->out_off = r->out_len;
+        }
+        tls_flush(r->s);
+    } else {
+        while (r->out_off < r->out_len) {
+            int n = us_socket_write(r->s, r->out + r->out_off, (int)(r->out_len - r->out_off));
+            if (n <= 0)
+                return;
+            r->out_off += (size_t)n;
+        }
     }
     if (r->state == R_CONNECT)
         r->state = R_HEAD;
@@ -648,18 +1039,30 @@ static struct us_socket_t *on_open(struct us_socket_t *s, int is_client, char *i
     r->s = s;
     r->cs = NULL;
     us_socket_nodelay(s, 1);
-    write_out((uint32_t)i);
+    if (r->tls)
+        tls_begin((uint32_t)i, s);
+    else
+        write_out((uint32_t)i);
     return s;
 }
 
 static struct us_socket_t *on_writable(struct us_socket_t *s) {
-    int32_t i = ext_of(s)->req;
+    Ext *e = ext_of(s);
+    int32_t i = e->req;
+    if (e->ssl) {
+        tls_flush(s);
+        return s;
+    }
     if (i >= 0 && (uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s)
         write_out((uint32_t)i);
     return s;
 }
 
 static struct us_socket_t *on_data(struct us_socket_t *s, char *data, int length) {
+    if (ext_of(s)->ssl) {
+        tls_data(s, data, length);
+        return s;
+    }
     int32_t i = ext_of(s)->req;
     if (i < 0) {
         // (An idle connection the server wrote to: not reusable.)
@@ -707,9 +1110,17 @@ static struct us_socket_t *on_end(struct us_socket_t *s) {
 
 static struct us_socket_t *on_close(struct us_socket_t *s, int code, void *reason) {
     (void)code, (void)reason;
-    int32_t i = ext_of(s)->req;
-    ext_of(s)->req = -1;
+    Ext *e = ext_of(s);
+    int32_t i = e->req;
+    e->req = -1;
     idle_remove(s);
+    if (e->ssl) {
+        SSL_free(e->ssl);
+        e->ssl = NULL;
+    }
+    free(e->pend);
+    e->pend = NULL;
+    e->pend_len = e->pend_cap = 0;
     if (i >= 0 && (uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s)
         lost((uint32_t)i);
     return s;
@@ -796,14 +1207,11 @@ static void start(uint32_t i) {
         connect_failed(i, 0, errno);
         return;
     }
-    if (is_connecting) {
-        struct us_socket_t *s = c;
-        ext_of(s)->req = (int32_t)i;
-    } else {
-        struct us_connecting_socket_t *cs = c;
-        ((Ext *)us_connecting_socket_ext(cs))->req = (int32_t)i;
-        r->cs = cs;
-    }
+    Ext *e = is_connecting ? ext_of(c) : us_connecting_socket_ext(c);
+    memset(e, 0, sizeof *e);
+    e->req = (int32_t)i;
+    if (!is_connecting)
+        r->cs = c;
 }
 
 // ---- beyond:native ----
@@ -853,9 +1261,11 @@ static JSValue js_fetch_init(JSContext *ctx, JSValueConst this_val, int argc, JS
     return JS_UNDEFINED;
 }
 
-// fetchRequest(task, host, port, head, body, headOnly): the request's
+// fetchRequest(task, host, port, head, body, headOnly, tls): the request's
 // handle. `head` is the request line and headers (a string or bytes), `body`
-// its bytes or null.
+// its bytes or null; `tls` null for http:, else { ca (PEM text, or null for
+// the bundled roots), reject (whether to check the certificate), servername
+// (or null) }.
 static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t port;
     if (JS_ToInt32(ctx, &port, argv[2]))
@@ -874,30 +1284,64 @@ static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc,
     memcpy(r->host, host, n);
     r->host[n] = 0;
     r->port = port;
-    // The pool's key: host:port.
-    char digits[12];
-    int nd = 0;
-    for (uint32_t v = (uint32_t)port; nd == 0 || v; v /= 10)
-        digits[nd++] = (char)('0' + v % 10);
-    memcpy(r->key, r->host, n);
-    r->key[n] = ':';
-    for (int d = 0; d < nd; d++)
-        r->key[n + 1 + d] = digits[nd - 1 - d];
-    r->key[n + 1 + nd] = 0;
     JS_FreeCString(ctx, host);
     r->out_len = hl + bl;
-    if (!reserve((uint8_t **)&r->out, &r->out_cap, r->out_len ? r->out_len : 1)) {
-        req_free(i);
-        return JS_ThrowOutOfMemory(ctx);
-    }
-    if (hl)
+    bool room = reserve((uint8_t **)&r->out, &r->out_cap, r->out_len ? r->out_len : 1);
+    if (room && hl)
         memcpy(r->out, head, hl);
-    if (bl)
+    if (room && bl)
         memcpy(r->out + hl, bodyb, bl);
     if (ho)
         JS_FreeCString(ctx, ho);
     if (bo)
         JS_FreeCString(ctx, bo);
+    if (!room) {
+        req_free(i);
+        return JS_ThrowOutOfMemory(ctx);
+    }
+    // The pool's key: host:port, and for TLS its context, whether the
+    // certificate is checked and the server name.
+    size_t k = 0;
+    if (JS_IsObject(argv[6])) {
+        JSValue ca = JS_GetPropertyStr(ctx, argv[6], "ca");
+        JSValue reject = JS_GetPropertyStr(ctx, argv[6], "reject");
+        JSValue servername = JS_GetPropertyStr(ctx, argv[6], "servername");
+        size_t ca_len = 0;
+        const char *ca_text = JS_IsString(ca) ? JS_ToCStringLen(ctx, &ca_len, ca) : NULL;
+        uint32_t id = 0;
+        r->tls = tls_ctx(ca_text, ca_len, &id);
+        if (ca_text)
+            JS_FreeCString(ctx, ca_text);
+        // (Unset: checked, unless NODE_TLS_REJECT_UNAUTHORIZED is 0.)
+        if (JS_IsUndefined(reject)) {
+            const char *env = getenv("NODE_TLS_REJECT_UNAUTHORIZED");
+            r->reject = !(env && !strcmp(env, "0"));
+        } else {
+            r->reject = JS_ToBool(ctx, reject);
+        }
+        if (JS_IsString(servername)) {
+            const char *sn = JS_ToCString(ctx, servername);
+            if (sn) {
+                snprintf(r->servername, sizeof r->servername, "%s", sn);
+                JS_FreeCString(ctx, sn);
+            }
+        }
+        if (!r->tls) {
+            req_free(i);
+            return JS_ThrowInternalError(ctx, "TLS is not available");
+        }
+        k = (size_t)snprintf(r->key, KEY_MAX - 300, "tls %u %d %s ", id, r->reject, r->servername);
+    }
+    char digits[12];
+    int nd = 0;
+    for (uint32_t v = (uint32_t)port; nd == 0 || v; v /= 10)
+        digits[nd++] = (char)('0' + v % 10);
+    memcpy(r->key + k, r->host, n);
+    k += n;
+    r->key[k++] = ':';
+    for (int d = 0; d < nd; d++)
+        r->key[k++] = digits[nd - 1 - d];
+    r->key[k] = 0;
     r->task = JS_DupValue(ctx, argv[0]);
     r->head_only = JS_ToBool(ctx, argv[5]);
     r->state = R_CONNECT;
@@ -947,7 +1391,7 @@ static JSValue js_fetch_pause(JSContext *ctx, JSValueConst this_val, int argc, J
 
 const JSCFunctionListEntry beyond_client_functions[] = {
     JS_CFUNC_DEF("fetchInit", 1, js_fetch_init),
-    JS_CFUNC_DEF("fetchRequest", 6, js_fetch_request),
+    JS_CFUNC_DEF("fetchRequest", 7, js_fetch_request),
     JS_CFUNC_DEF("fetchAbort", 1, js_fetch_abort),
     JS_CFUNC_DEF("fetchPause", 2, js_fetch_pause),
 };
