@@ -204,18 +204,20 @@ middleware that sets a header after the handler, `bench/run.sh hono`):
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 37,005 | 35,946 | 32,540 | 26 MB |
-| Bun | 51,795 | 48,547 | 47,357 | 33 MB |
+| Beyond | 43,324 | 37,824 | 35,061 | 26 MB |
+| Bun | 54,053 | 48,858 | 47,486 | 33 MB |
 
-Beyond answers 69-74% as many requests a second as Bun (it answered
+Beyond answers 74-80% as many requests a second as Bun (it answered
 about half before Luminous compiled Hono's classes: written as class
 expressions, with private fields, private methods and fields that are
-arrow functions), in 79% of the memory. Its responses are Bun's but for
-the case of header names. What Hono still costs more here: the closures
-and objects each request makes (about 30 of each), the response its
-middleware makes again with its headers copied, and its router's
-`match`, a function using `this` outside a class, which stays
-interpreted.
+arrow functions; 69-74% before native code made closures inline, async
+ones included, and async frames in one cell), in 79% of the memory. Its
+responses are Bun's but for the case of header names. What Hono still
+costs more here: the promises and awaits of each request (a native
+async call and its await take about three times Bun's time), the
+objects the engine makes for it, the response its middleware makes
+again with its headers copied, and its router's `match`, a function
+using `this` outside a class, which stays interpreted.
 
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
