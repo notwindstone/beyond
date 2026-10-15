@@ -476,6 +476,10 @@ function initReadableStream(stream: ReadableStream<any>): void {
   stream._reader = undefined;
   stream._storedError = undefined;
   stream._disturbed = false;
+  // (Made without the constructor: its fields.)
+  stream._blobType = null;
+  stream._sendType = null;
+  stream._received = false;
 }
 
 export class ReadableStreamDefaultController<R = any> implements Queued {
@@ -2845,12 +2849,36 @@ export function takeWholeStream(stream: ReadableStream<any>): any[] | null {
   return chunks;
 }
 
+/**
+ * A stream of `bytes`, then closed: made directly, as a source that
+ * enqueued them and closed in its `start` leaves it (started: no pull is
+ * made once its close is requested).
+ */
 export function streamOfBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
-  const stream = createReadableStream<Uint8Array>(noop, () => resolved(), () => resolved(), 0);
-  if (bytes.length > 0) controllerEnqueue(stream._controller, bytes);
-  controllerClose(stream._controller);
+  const stream = Object.create(ReadableStream.prototype) as ReadableStream<Uint8Array>;
+  initReadableStream(stream);
+  const c = new ReadableStreamDefaultController<Uint8Array>(KEY);
+  c._stream = stream;
+  c._started = true;
+  c._strategySize = oneSize;
+  c._strategyHWM = 0;
+  c._pullAlgorithm = settled;
+  c._cancelAlgorithm = settled;
+  stream._controller = c;
+  if (bytes.length > 0) {
+    c._queue.push({ value: bytes, size: 1 });
+    c._queueTotalSize = 1;
+    c._closeRequested = true;
+  } else {
+    c._closeRequested = true;
+    clearAlgorithms(c);
+    readableStreamClose(stream);
+  }
   return stream;
 }
+
+const oneSize = (): number => 1;
+const settled = (): Promise<void> => resolved();
 
 /** A body chunk's bytes: a view's or an ArrayBuffer's, or a string's UTF-8 (as Bun's). */
 export function chunkBytes(value: unknown): Uint8Array {

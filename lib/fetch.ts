@@ -51,8 +51,14 @@ function tokenChar(c: number): boolean {
   );
 }
 
+// Header names already checked, and their lower case (programs and
+// frameworks give the same few names to every response).
+const checkedNames = new Map<string, string>();
+
 /** A header name as the standard allows it (an HTTP token), in lower case. */
 function checkName(name: string): string {
+  const known = checkedNames.get(name);
+  if (known !== undefined) return known;
   const n = String(name);
   let upper = false;
   for (let i = 0; i < n.length; i++) {
@@ -61,7 +67,10 @@ function checkName(name: string): string {
     if (c >= 65 && c <= 90) upper = true;
   }
   if (n.length === 0) throw new TypeError(`Invalid header name: "${n}"`);
-  return upper ? n.toLowerCase() : n;
+  const lower = upper ? n.toLowerCase() : n;
+  // (At most 256 of them: the names a program uses, not every one it is sent.)
+  if (typeof name === "string" && checkedNames.size < 256) checkedNames.set(name, lower);
+  return lower;
 }
 
 function isSpace(c: number): boolean {
@@ -117,15 +126,19 @@ function combine(name: string, a: string, b: string): string {
 
 export class Headers {
   // Lower-case names and their values, in the order they were added.
-  _names: string[] = [];
-  _values: string[] = [];
+  _names: string[];
+  _values: string[];
 
   constructor(init?: HeadersInit) {
-    if (init === undefined || init === null) return;
     if (init instanceof Headers) {
       this._names = init._names.slice();
       this._values = init._values.slice();
-    } else if (Array.isArray(init) || typeof (init as any)[Symbol.iterator] === "function") {
+      return;
+    }
+    this._names = [];
+    this._values = [];
+    if (init === undefined || init === null) return;
+    if (Array.isArray(init) || typeof (init as any)[Symbol.iterator] === "function") {
       for (const pair of init as Iterable<[string, string]>) {
         const p = Array.from(pair as any);
         if (p.length !== 2) throw new TypeError("A header must be a [name, value] pair");
