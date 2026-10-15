@@ -36,6 +36,7 @@ unsafe extern "C" {
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
     fn beyond_flush_stdout();
+    fn beyond_server_after_tick();
 }
 
 /// Nanoseconds since the program started.
@@ -185,5 +186,8 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         let ts = wait.map(|ns| Timespec { tv_sec: (ns / 1_000_000_000) as i64, tv_nsec: (ns % 1_000_000_000) as i64 });
         // SAFETY: as above; `ts` outlives the call.
         unsafe { us_loop_run_bun_tick(uloop, ts.as_ref().map_or(std::ptr::null(), |t| t as *const Timespec), now) };
+        // (Requests whose body is still coming: their handlers.)
+        // SAFETY: as above.
+        unsafe { beyond_server_after_tick() };
     }
 }

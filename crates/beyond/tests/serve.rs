@@ -112,6 +112,36 @@ fn serve() {
         request(port, "POST /pipe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
     assert_eq!(dechunk(&body).as_deref(), Some("hello"), "{body:?}");
 
+    // A body that arrives slowly: the handler is called on the head, and its
+    // body is read as it comes (here, sent back as it is read).
+    {
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s.write_all(b"POST /pipe HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\none\r\n")
+            .unwrap();
+        // (The first part comes back before the rest is sent.)
+        let mut got = Vec::new();
+        let mut buf = [0; 4096];
+        while !String::from_utf8_lossy(&got).contains("\r\n\r\n3\r\none\r\n") {
+            let n = s.read(&mut buf).unwrap();
+            assert!(n > 0, "closed: {:?}", String::from_utf8_lossy(&got));
+            got.extend_from_slice(&buf[..n]);
+        }
+        s.write_all(b"3\r\ntwo\r\n0\r\n\r\n").unwrap();
+        s.read_to_end(&mut got).unwrap();
+        let out = String::from_utf8_lossy(&got);
+        let (_, body) = out.split_once("\r\n\r\n").unwrap();
+        assert_eq!(dechunk(body).as_deref(), Some("onetwo"), "{body:?}");
+    }
+
+    // A large body read as a stream (the connection paused while it waits).
+    let big = "x".repeat(4 << 20);
+    let (_, body) = request(
+        port,
+        &format!("POST /count HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{big}", big.len()),
+    );
+    assert_eq!(body, format!("{}", big.len()));
+
     let (head, body) = get(port, "/throw");
     assert_eq!(head[0], "HTTP/1.1 500 Internal Server Error");
     assert_eq!(body, "Internal Server Error");

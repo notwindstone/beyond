@@ -18,6 +18,8 @@ typedef struct uws_req_s uws_req_t;
 typedef struct uws_res_s uws_res_t;
 uws_app_t *uws_create_app(int ssl, struct us_bun_socket_context_options_t options);
 void uws_app_destroy(int ssl, uws_app_t *app);
+void uws_app_close(int ssl, uws_app_t *app);
+size_t uws_app_close_idle(int ssl, uws_app_t *app, int close_when_idle);
 void uws_app_any(int ssl, uws_app_t *app, const char *pattern, size_t pattern_len,
                  void (*handler)(uws_res_t *, uws_req_t *, void *), void *user);
 void uws_app_listen_with_config(int ssl, uws_app_t *app, const char *host, uint16_t port, int32_t options,
@@ -36,6 +38,8 @@ bool uws_res_write(int ssl, uws_res_t *res, const char *data, size_t *length);
 void uws_res_end_stream(int ssl, uws_res_t *res, bool close_connection);
 void uws_res_on_writable(int ssl, uws_res_t *res, bool (*handler)(uws_res_t *, uint64_t, void *), void *data);
 void uws_res_clear_on_writable(int ssl, uws_res_t *res);
+void uws_res_pause(int ssl, uws_res_t *res);
+void uws_res_resume(int ssl, uws_res_t *res);
 size_t beyond_req_method(uws_req_t *req, const char **dest);
 void beyond_req_headers(uws_req_t *req, void (*cb)(void *, const char *, size_t, const char *, size_t), void *user);
 int us_listen_socket_port(struct us_listen_socket_t *ls);
@@ -60,8 +64,9 @@ static int nservers;
 // ---- Requests: slots, named by index and generation (a stale handle is
 // ignored, not dereferenced) ----
 
-// SYNC: in the handler; BODY: reading the request's body; ASYNC: waiting
-// for `respond`; STREAM: the response's head sent, its body being written.
+// SYNC: in the handler; BODY: reading the request's body before calling the
+// handler (until it has come, or the loop's turn ends); ASYNC: waiting for
+// `respond`; STREAM: the response's head sent, its body being written.
 enum { FREE, SYNC, BODY, ASYNC, STREAM };
 
 typedef struct {
@@ -74,6 +79,10 @@ typedef struct {
                      // streamed response's writable callback
     char *body;
     size_t body_len, body_cap;
+    // A body still arriving once the handler was called: handed to
+    // `incoming` (JavaScript's), unless the program dropped it.
+    bool body_open, body_dropped;
+    JSValue incoming;
     uint32_t next_free;
 } Slot;
 
@@ -98,6 +107,8 @@ static uint32_t slot_alloc(void) {
     s->aborted = false;
     s->body = NULL;
     s->body_len = s->body_cap = 0;
+    s->body_open = s->body_dropped = false;
+    s->incoming = JS_UNDEFINED;
     for (int k = 0; k < 4; k++)
         s->args[k] = JS_UNDEFINED;
     return i;
@@ -112,6 +123,8 @@ static void slot_free(uint32_t i) {
     }
     free(s->body);
     s->body = NULL;
+    s->incoming = JS_UNDEFINED;
+    s->body_open = false;
     s->state = FREE;
     s->gen++;
     s->next_free = free_head;
@@ -120,6 +133,19 @@ static void slot_free(uint32_t i) {
 
 // A handle: index + generation * 2^24 (an integer JavaScript number).
 static double handle_of(uint32_t i) { return (double)i + (double)(slots[i].gen & 0x1FFFFFFF) * 16777216.0; }
+
+// What callbacks of uWebSockets get: the slot and its generation.
+static void *cb_data(uint32_t i) { return (void *)(uintptr_t)((uint64_t)i | (uint64_t)slots[i].gen << 32); }
+
+// The slot a callback's data names, if it is still that request's.
+static Slot *cb_slot(void *data, uint32_t *index) {
+    uint64_t v = (uintptr_t)data;
+    uint32_t i = (uint32_t)v;
+    if (i >= nslots || slots[i].state == FREE || slots[i].gen != (uint32_t)(v >> 32))
+        return NULL;
+    *index = i;
+    return &slots[i];
+}
 
 static Slot *slot_of(double h, uint32_t *index) {
     if (!(h >= 0))
@@ -149,16 +175,25 @@ static const char *const common[] = {
 static JSValue common_values[NCOMMON];
 static uint8_t common_lens[NCOMMON];
 
+// (incoming, chunk, kind) => void: request bodies' events, for every
+// server's (bodyHandler).
+static JSValue body_handler = JS_UNDEFINED;
+enum { BODY_DATA = 0, BODY_END = 1, BODY_ABORTED = 2 };
+
 // The JavaScript values marked while the program runs (module.c's hook).
 void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
+    JS_MarkValue(rt, body_handler, mark_func);
     for (int i = 0; i < nservers; i++)
         JS_MarkValue(rt, servers[i].handler, mark_func);
     for (size_t i = 0; i < NCOMMON; i++)
         JS_MarkValue(rt, common_values[i], mark_func);
-    for (uint32_t i = 0; i < nslots; i++)
-        if (slots[i].state != FREE)
+    for (uint32_t i = 0; i < nslots; i++) {
+        if (slots[i].state != FREE) {
             for (int k = 0; k < 4; k++)
                 JS_MarkValue(rt, slots[i].args[k], mark_func);
+            JS_MarkValue(rt, slots[i].incoming, mark_func);
+        }
+    }
 }
 
 // ---- Handing a request to JavaScript ----
@@ -229,58 +264,139 @@ static void on_aborted(uws_res_t *res, void *data);
 
 // Calls the server's handler with the slot's request; the slot is freed
 // when the handler responded, else it waits (for `respond`, or an abort).
-static void dispatch(uint32_t i) {
+// The body: all of it (or none), or, `streaming`, what came of it so far,
+// the rest handed to the object the handler returns as it arrives.
+static void dispatch(uint32_t i, bool streaming) {
     JSContext *ctx = beyond_js_context();
     Slot *s = &slots[i];
-    JSValue argv[5];
+    uint32_t gen = s->gen;
+    JSValue argv[6];
     argv[0] = JS_NewFloat64(ctx, handle_of(i));
     argv[1] = s->args[0];
     argv[2] = s->args[1];
     argv[3] = s->args[2];
-    argv[4] = s->body ? JS_NewArrayBufferCopy(ctx, (const uint8_t *)s->body, s->body_len) : JS_UNDEFINED;
+    argv[5] = JS_UNDEFINED;
+    if (streaming) {
+        argv[4] = JS_TRUE;
+        if (s->body_len)
+            argv[5] = JS_NewUint8ArrayCopy(ctx, (const uint8_t *)s->body, s->body_len);
+        free(s->body);
+        s->body = NULL;
+        s->body_len = s->body_cap = 0;
+        s->body_open = true;
+    } else {
+        argv[4] = s->body ? JS_NewArrayBufferCopy(ctx, (const uint8_t *)s->body, s->body_len) : JS_UNDEFINED;
+    }
     s->state = SYNC;
-    JSValue r = JS_Call(ctx, s->server->handler, JS_UNDEFINED, 5, argv);
-    JS_FreeValue(ctx, argv[4]);
+    JSValue r = JS_Call(ctx, s->server->handler, JS_UNDEFINED, 6, argv);
     if (JS_IsException(r))
-        beyond_js_report();
-    JS_FreeValue(ctx, r);
-    if (beyond_js_run_jobs() < 0)
         beyond_js_report();
     // (`respond` may have freed it, and the slot be another request's now.)
     s = &slots[i];
-    if (s->state == SYNC) {
+    if (streaming && s->state != FREE && s->gen == gen)
+        s->incoming = JS_IsException(r) ? JS_UNDEFINED : r;
+    if (beyond_js_run_jobs() < 0)
+        beyond_js_report();
+    s = &slots[i];
+    if (s->state == SYNC && s->gen == gen) {
         s->state = ASYNC;
-        uws_res_on_aborted(0, s->res, on_aborted, (void *)(uintptr_t)i);
+        uws_res_on_aborted(0, s->res, on_aborted, cb_data(i));
     }
+}
+
+// Hands a request's body event to JavaScript: a chunk, the end, or the
+// client gone.
+static void body_event(uint32_t i, const char *chunk, size_t len, int kind) {
+    JSContext *ctx = beyond_js_context();
+    Slot *s = &slots[i];
+    if (!JS_IsObject(s->incoming) || s->body_dropped)
+        return;
+    JSValue argv[3] = {s->incoming, chunk ? JS_NewUint8ArrayCopy(ctx, (const uint8_t *)chunk, len) : JS_NULL,
+                       JS_NewInt32(ctx, kind)};
+    JSValue r = JS_Call(ctx, body_handler, JS_UNDEFINED, 3, argv);
+    if (JS_IsException(r))
+        beyond_js_report();
+    if (beyond_js_run_jobs() < 0)
+        beyond_js_report();
+}
+
+// Requests whose body has not all come by the end of the loop's turn they
+// came in: their handler is called then (as Bun calls it on the head), the
+// body following. Handles (index and generation).
+static uint64_t *waiting;
+static uint32_t nwaiting, cap_waiting;
+
+// (Called by the loop after each of its turns.)
+void beyond_server_after_tick(void) {
+    if (!nwaiting)
+        return;
+    uint32_t n = nwaiting;
+    uint64_t list[64];
+    uint64_t *w = n <= 64 ? list : malloc(n * sizeof *w);
+    memcpy(w, waiting, n * sizeof *w);
+    nwaiting = 0;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i;
+        Slot *s = cb_slot((void *)(uintptr_t)w[k], &i);
+        if (s && s->state == BODY)
+            dispatch(i, true);
+    }
+    if (w != list)
+        free(w);
 }
 
 static void call_writable(uint32_t i, bool ok);
 
 static void on_aborted(uws_res_t *res, void *data) {
     (void)res;
-    uint32_t i = (uint32_t)(uintptr_t)data;
-    if (i < nslots && slots[i].state != FREE) {
-        slots[i].aborted = true;
-        // (A streamed response waiting to write learns it now.)
-        if (slots[i].state == STREAM)
-            call_writable(i, false);
+    uint32_t i;
+    Slot *s = cb_slot(data, &i);
+    if (!s)
+        return;
+    // (Gone before its handler was called: it never is.)
+    if (s->state == BODY) {
+        slot_free(i);
+        return;
     }
+    s->aborted = true;
+    // (A body being read, and a streamed response waiting to write, learn
+    // it now.)
+    if (s->body_open) {
+        s->body_open = false;
+        body_event(i, NULL, 0, BODY_ABORTED);
+    }
+    if (slots[i].state == STREAM && slots[i].gen == s->gen)
+        call_writable(i, false);
 }
 
 static void on_body(uws_res_t *res, const char *chunk, size_t len, bool last, void *data) {
     (void)res;
-    uint32_t i = (uint32_t)(uintptr_t)data;
-    Slot *s = &slots[i];
-    if (s->body_len + len > s->body_cap) {
-        s->body_cap = (s->body_len + len) * 2;
-        s->body = realloc(s->body, s->body_cap);
+    uint32_t i;
+    Slot *s = cb_slot(data, &i);
+    if (!s)
+        return;
+    if (s->state == BODY) {
+        if (s->body_len + len > s->body_cap) {
+            s->body_cap = (s->body_len + len) * 2;
+            s->body = realloc(s->body, s->body_cap);
+        }
+        memcpy(s->body + s->body_len, chunk, len);
+        s->body_len += len;
+        if (last) {
+            if (!s->body)
+                s->body = malloc(1);
+            dispatch(i, false);
+        }
+        return;
     }
-    memcpy(s->body + s->body_len, chunk, len);
-    s->body_len += len;
-    if (last) {
-        if (!s->body)
-            s->body = malloc(1);
-        dispatch(i);
+    if (!s->body_open)
+        return;
+    if (len)
+        body_event(i, chunk, len, BODY_DATA);
+    s = &slots[i];
+    if (last && s->state != FREE && s->body_open) {
+        s->body_open = false;
+        body_event(i, NULL, 0, BODY_END);
     }
 }
 
@@ -321,11 +437,16 @@ static void on_request(uws_res_t *res, uws_req_t *req, void *user) {
     bool has_body = (cl && !(cl == 1 && v[0] == '0')) || uws_req_get_header(req, "transfer-encoding", 17, &v);
     if (has_body) {
         s->state = BODY;
-        uws_res_on_data(0, res, on_body, (void *)(uintptr_t)i);
-        uws_res_on_aborted(0, res, on_aborted, (void *)(uintptr_t)i);
+        uws_res_on_data(0, res, on_body, cb_data(i));
+        uws_res_on_aborted(0, res, on_aborted, cb_data(i));
+        if (nwaiting == cap_waiting) {
+            cap_waiting = cap_waiting ? cap_waiting * 2 : 64;
+            waiting = realloc(waiting, cap_waiting * sizeof *waiting);
+        }
+        waiting[nwaiting++] = (uintptr_t)cb_data(i);
         return;
     }
-    dispatch(i);
+    dispatch(i, false);
 }
 
 // ---- Responding ----
@@ -531,7 +652,7 @@ static JSValue js_respond_start(JSContext *ctx, JSValueConst this_val, int argc,
     else
         uws_res_cork(0, s->res, &r, write_head_cb);
     s->state = STREAM;
-    uws_res_on_aborted(0, s->res, on_aborted, (void *)(uintptr_t)i);
+    uws_res_on_aborted(0, s->res, on_aborted, cb_data(i));
     return JS_TRUE;
 }
 
@@ -593,8 +714,9 @@ static void call_writable(uint32_t i, bool ok) {
 
 static bool on_writable(uws_res_t *res, uint64_t offset, void *data) {
     (void)offset;
-    uint32_t i = (uint32_t)(uintptr_t)data;
-    if (i >= nslots || slots[i].state != STREAM || slots[i].res != res)
+    uint32_t i;
+    Slot *s = cb_slot(data, &i);
+    if (!s || s->state != STREAM || s->res != res)
         return true;
     uws_res_clear_on_writable(0, res);
     call_writable(i, true);
@@ -613,7 +735,7 @@ static JSValue js_when_writable(JSContext *ctx, JSValueConst this_val, int argc,
         return JS_FALSE;
     JS_FreeValue(ctx, s->args[3]);
     s->args[3] = JS_DupValue(ctx, argv[1]);
-    uws_res_on_writable(0, s->res, on_writable, (void *)(uintptr_t)i);
+    uws_res_on_writable(0, s->res, on_writable, cb_data(i));
     return JS_TRUE;
 }
 
@@ -641,6 +763,48 @@ static JSValue js_end_stream(JSContext *ctx, JSValueConst this_val, int argc, JS
         uws_res_clear_on_writable(0, res);
         us_socket_close((struct us_socket_t *)res, 0, NULL);
     }
+    return JS_TRUE;
+}
+
+// ---- Request bodies ----
+
+// bodyHandler(fn): the function request bodies' events are handed to:
+// fn(incoming, chunk, kind), kind 0 a chunk, 1 the end, 2 the client gone.
+static JSValue js_body_handler(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    body_handler = JS_DupValue(ctx, argv[0]);
+    return JS_UNDEFINED;
+}
+
+// requestPause(handle, paused): stops (or resumes) reading the request's
+// body.
+static JSValue js_request_pause(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || !s->body_open || s->aborted)
+        return JS_FALSE;
+    if (JS_ToBool(ctx, argv[1]))
+        uws_res_pause(0, s->res);
+    else
+        uws_res_resume(0, s->res);
+    return JS_TRUE;
+}
+
+// requestDrop(handle): the rest of the request's body is not wanted (it is
+// read and dropped).
+static JSValue js_request_drop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || !s->body_open)
+        return JS_FALSE;
+    s->body_dropped = true;
+    if (!s->aborted)
+        uws_res_resume(0, s->res);
     return JS_TRUE;
 }
 
@@ -685,26 +849,38 @@ static JSValue js_server_port(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_NewInt32(ctx, us_listen_socket_port(servers[k].listen));
 }
 
-// stop(server): no new connections (those open finish).
+// stopServer(server, force): no new connections; as Bun's, idle ones are
+// closed and the others once their request is answered, or (`force`) all
+// of them now.
 static JSValue js_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t k;
     if (JS_ToInt32(ctx, &k, argv[0]))
         return JS_EXCEPTION;
-    if (k >= 0 && k < nservers && servers[k].listen) {
-        us_listen_socket_close(servers[k].listen);
-        servers[k].listen = NULL;
+    if (k < 0 || k >= nservers || !servers[k].app)
+        return JS_UNDEFINED;
+    Server *srv = &servers[k];
+    if (srv->listen) {
+        us_listen_socket_close(srv->listen);
+        srv->listen = NULL;
     }
+    if (JS_ToBool(ctx, argv[1]))
+        uws_app_close(0, srv->app);
+    else
+        uws_app_close_idle(0, srv->app, 1);
     return JS_UNDEFINED;
 }
 
 const JSCFunctionListEntry beyond_server_functions[] = {
     JS_CFUNC_DEF("listen", 3, js_listen),
     JS_CFUNC_DEF("serverPort", 1, js_server_port),
-    JS_CFUNC_DEF("stopServer", 1, js_stop),
+    JS_CFUNC_DEF("stopServer", 2, js_stop),
     JS_CFUNC_DEF("respond", 6, js_respond),
     JS_CFUNC_DEF("respondStart", 4, js_respond_start),
     JS_CFUNC_DEF("writeChunk", 2, js_write_chunk),
     JS_CFUNC_DEF("whenWritable", 2, js_when_writable),
     JS_CFUNC_DEF("endStream", 2, js_end_stream),
+    JS_CFUNC_DEF("bodyHandler", 1, js_body_handler),
+    JS_CFUNC_DEF("requestPause", 2, js_request_pause),
+    JS_CFUNC_DEF("requestDrop", 1, js_request_drop),
 };
 const int beyond_server_function_count = sizeof beyond_server_functions / sizeof *beyond_server_functions;

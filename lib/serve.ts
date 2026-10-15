@@ -2,8 +2,20 @@
 // Response (or a promise of one), as Bun.serve. The native core
 // (crates/beyond-rt/native/server.c) runs uWebSockets.
 
-import { endStream, listen, respond, respondStart, serverPort, stopServer, whenWritable, writeChunk } from "beyond:native";
-import { Request, Response } from "./fetch.ts";
+import {
+  bodyHandler,
+  endStream,
+  listen,
+  requestDrop,
+  requestPause,
+  respond,
+  respondStart,
+  serverPort,
+  stopServer,
+  whenWritable,
+  writeChunk,
+} from "beyond:native";
+import { Incoming, IncomingOwner, Request, Response } from "./fetch.ts";
 import { chunkBytes, ReadableStream, ReadableStreamDefaultReader, readableStreamCancel } from "./streams.ts";
 
 export interface ServeOptions {
@@ -33,13 +45,49 @@ export class Server {
     return `http://${host}:${this.port}/`;
   }
 
-  /** Stop accepting connections (those open finish). */
-  stop(): void {
-    if (this._stopped) return;
+  /**
+   * Stop accepting connections: idle ones are closed, the others once their
+   * request is answered, or all of them now with `closeActiveConnections`.
+   */
+  stop(closeActiveConnections?: boolean): void {
+    if (this._stopped && !closeActiveConnections) return;
     this._stopped = true;
-    stopServer(this._id);
+    stopServer(this._id, closeActiveConnections === true);
   }
 }
+
+/** A request's body still arriving (the owner of its Incoming). */
+class Arriving implements IncomingOwner {
+  handle: number;
+
+  constructor(handle: number) {
+    this.handle = handle;
+  }
+
+  _pause(paused: boolean): void {
+    requestPause(this.handle, paused);
+  }
+
+  _cancel(): void {
+    requestDrop(this.handle);
+  }
+}
+
+const BODY_DATA = 0;
+const BODY_END = 1;
+
+/** The native server's events of the bodies still arriving. */
+function onBody(incoming: Incoming, chunk: Uint8Array | null, kind: number): void {
+  if (kind === BODY_DATA) incoming.push(chunk as Uint8Array);
+  else if (kind === BODY_END) incoming.end();
+  else {
+    const e = new Error("The connection was closed before the request body was read");
+    (e as any).code = "ECONNRESET";
+    incoming.fail(e);
+  }
+}
+
+bodyHandler(onBody);
 
 function internalError(e: unknown): Response {
   console.error(e);
@@ -128,8 +176,24 @@ export function serve(options: ServeOptions): Server {
     }
     return internalError(e);
   };
-  const handler = (handle: number, method: string, url: string, flat: string[], body: ArrayBuffer | undefined) => {
-    const request = Request._fromServer(method, url, flat, body);
+  // `body`: all of it, none, or `true` when it is still arriving (what came
+  // of it in `first`): the handler is then called with it as a stream, and
+  // the Incoming it is read from is returned for the rest.
+  const handler = (
+    handle: number,
+    method: string,
+    url: string,
+    flat: string[],
+    body: ArrayBuffer | true | undefined,
+    first: Uint8Array | undefined,
+  ): Incoming | undefined => {
+    const request = Request._fromServer(method, url, flat, body === true ? undefined : body);
+    let incoming: Incoming | undefined = undefined;
+    if (body === true) {
+      incoming = new Incoming(new Arriving(handle));
+      if (first !== undefined) incoming.push(first);
+      request._incoming = incoming;
+    }
     let res: Response | Promise<Response>;
     try {
       res = options.fetch(request, server);
@@ -144,6 +208,7 @@ export function serve(options: ServeOptions): Server {
         (e) => Promise.resolve(onError(e)).then((r) => send(handle, r), (e2) => send(handle, internalError(e2))),
       );
     }
+    return incoming;
   };
   const id = listen(hostname, port, handler);
   if (id < 0) throw new Error(`Failed to start server. Is port ${port} in use?`);

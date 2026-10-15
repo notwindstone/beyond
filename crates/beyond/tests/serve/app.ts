@@ -52,6 +52,15 @@ const server = Beyond.serve({
       );
     }
     if (path === "/pipe") return new Response(req.body);
+    if (path === "/count") {
+      let n = 0;
+      for await (const chunk of req.body!) {
+        n += chunk.length;
+        // (A slow reader.)
+        if (n % (1 << 20) < chunk.length) await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      return new Response(String(n));
+    }
     if (req.method === "POST") return new Response(`echo: ${await req.text()}`, { status: 201 });
     if (path === "/throw") throw new Error("boom");
     if (path === "/stop") {

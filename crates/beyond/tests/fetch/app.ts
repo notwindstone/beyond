@@ -81,6 +81,29 @@ await show("post stream", async () => {
   });
   return (await fetch(B + "/echo", { method: "POST", body })).text();
 });
+await show("post stream slow", async () => {
+  // (Sent as it is read: chunked, the parts as they come.)
+  const body = new ReadableStream({
+    async pull(c) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      c.enqueue(new TextEncoder().encode("p"));
+      if (++parts === 3) c.close();
+    },
+  });
+  let parts = 0;
+  return (await fetch(B + "/echo", { method: "POST", body })).text();
+});
+await show("stream headers", async () => {
+  const body = new ReadableStream({ start: (c) => (c.enqueue(new Uint8Array([97])), c.close()) });
+  return (await fetch(B + "/headers", { method: "POST", body })).text();
+});
+await show("post generator", async () => {
+  const body = async function* () {
+    yield "gen";
+    yield new Uint8Array([33]);
+  };
+  return (await fetch(B + "/echo", { method: "POST", body: body() as any })).text();
+});
 await show("put", async () => (await fetch(B + "/echo", { method: "PUT", body: "put" })).text());
 await show("request object", async () => (await fetch(new Request(B + "/echo", { method: "POST", body: "req" }))).text());
 await show("url object", async () => (await fetch(new URL("/final?u=1", B))).text());

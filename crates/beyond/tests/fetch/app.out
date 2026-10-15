@@ -24,6 +24,9 @@ post params application/x-www-form-urlencoded;charset=UTF-8 a=1&b=x+y
 post json  {"a":1}
 post blob text/x-blob blob
 post stream POST stream
+post stream slow POST ppp
+stream headers connection=keep-alive;user-agent=*;accept=*/*;host=*;accept-encoding=gzip, deflate, br, zstd;transfer-encoding=chunked;
+post generator POST gen!
 put PUT put
 request object POST req
 url object final /final?u=1

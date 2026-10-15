@@ -105,6 +105,20 @@ fn send<S: Write>(s: &mut S, status: &str, headers: &[(&str, &str)], body: &[u8]
 fn answer<S: Write>(s: &mut S, req: &Req) -> bool {
     let p = req.path.as_str();
     match (req.method.as_str(), p) {
+        (_, "/headers") => {
+            // The headers in the order sent; the user agent and host as
+            // whether they are there, as they differ.
+            let mut out = String::new();
+            for (n, v) in &req.headers {
+                let v = match n.as_str() {
+                    "user-agent" if v != "mine" => "*",
+                    "host" => "*",
+                    _ => v,
+                };
+                out.push_str(&format!("{n}={v};"));
+            }
+            send(s, "200 OK", &[], out.as_bytes());
+        }
         ("HEAD", _) => {
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n");
         }
@@ -123,20 +137,6 @@ fn answer<S: Write>(s: &mut S, req: &Req) -> bool {
             &[("X-Multi", "a"), ("X-Multi", "b"), ("Set-Cookie", "a=1"), ("Set-Cookie", "b=2")],
             b"tea",
         ),
-        (_, "/headers") => {
-            // The headers in the order sent; the user agent and host as
-            // whether they are there, as they differ.
-            let mut out = String::new();
-            for (n, v) in &req.headers {
-                let v = match n.as_str() {
-                    "user-agent" if v != "mine" => "*",
-                    "host" => "*",
-                    _ => v,
-                };
-                out.push_str(&format!("{n}={v};"));
-            }
-            send(s, "200 OK", &[], out.as_bytes());
-        }
         (_, "/redir") => send(s, "302 Found", &[("Location", "/final?x=1")], b""),
         (_, "/loop") => send(s, "301 Moved Permanently", &[("Location", "/loop")], b""),
         (_, "/gzip") => send(s, "200 OK", &[("Content-Encoding", "gzip")], &GZIP),

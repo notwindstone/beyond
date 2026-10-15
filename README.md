@@ -55,12 +55,16 @@ networking code uses its extensions), zlib, brotli's decoder
   Bun's does.
 - `Beyond.serve({ port, hostname, fetch, error })`, as `Bun.serve`: HTTP/1.1
   on Bun's uSockets and uWebSockets, keep-alive and pipelining included. The
-  `fetch` handler returns a `Response` or a promise of one; request bodies
-  are read whole before it runs. A response whose body is a stream (or an
-  async generator) is sent chunked as it is read, each chunk written when
-  the connection has room (uWebSockets' writable callbacks, as Bun's sink
-  does); a stream that fails midway closes the connection. `server.port`,
-  `server.url`, `server.stop()`.
+  `fetch` handler returns a `Response` or a promise of one. A request's
+  body that comes with its head is handed to it whole; one still coming
+  when the loop's turn ends is read as it arrives (the handler called then,
+  as Bun calls it on the head), the connection paused while it waits for a
+  reader. A response whose body is a stream (or an async generator) is
+  sent chunked as it is read, each chunk written when the connection has
+  room (uWebSockets' writable callbacks, as Bun's sink does); a stream that
+  fails midway closes the connection. `server.port`, `server.url`,
+  `server.stop(closeActiveConnections)` (idle connections closed, the
+  others once answered, or all of them).
 - `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
   picohttpparser), over TLS for `https:` (OpenSSL, on the socket through
   memory BIOs; Bun's bundled Mozilla root certificates trusted, with
@@ -75,8 +79,9 @@ networking code uses its extensions), zlib, brotli's decoder
   connection is paused while more than 1 MB is waiting; a response that
   came whole with its head is handed over at once. Its errors are Bun's
   (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `UnexpectedRedirect`, ...),
-  with their codes, messages and properties. Request bodies are sent whole
-  (a stream is read first).
+  with their codes, messages and properties. A request body that is a
+  stream (or an async generator) is sent chunked as it is read, waiting
+  while the connection is backpressured.
 - `Blob`, `File` and `FormData`; bodies of them, of strings, bytes and
   `URLSearchParams` (multipart/form-data written and read, urlencoded
   read: `formData()`, `blob()`), with their content types as Bun gives them.
@@ -130,10 +135,8 @@ against a server of the test's own.
 
 Not yet: TLS for `Beyond.serve`, client certificates and
 `checkServerIdentity` for `fetch`, HTTP/2, WebSockets, `crypto.subtle`,
-request bodies as they arrive (on the server, and sent by `fetch`: they are
-read whole first), TextDecoder's legacy encodings but windows-1252; errors
-print without Bun's source excerpt, and their stacks' lines are the
-bundle's.
+TextDecoder's legacy encodings but windows-1252; errors print without
+Bun's source excerpt, and their stacks' lines are the bundle's.
 
 ## Performance
 

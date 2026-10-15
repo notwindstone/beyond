@@ -7,10 +7,11 @@
 // closes) and decoded (gzip, deflate, br, zstd). What happens is handed to
 // the JavaScript handler `fetchInit` set, with the request's task:
 // (task, HEAD, status, statusText, [name, value, ...]), (task, DATA,
-// Uint8Array), (task, END), (task, ERROR, code, message), or, when the head
+// Uint8Array), (task, END), (task, ERROR, code, kind), or, when the head
 // and the whole body came together (most responses), (task, COMPLETE,
 // status, statusText, [name, value, ...], ArrayBuffer), the connection back
-// in the pool first.
+// in the pool first; and (task, DRAIN) when a request body sent as it is
+// read (fetchWrite) may take more.
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -43,7 +44,11 @@ struct us_loop_t *uws_get_loop(void);
 
 #define KIND_FETCH 40
 
-enum { EV_HEAD = 1, EV_DATA = 2, EV_END = 3, EV_ERROR = 4, EV_COMPLETE = 5 };
+enum { EV_HEAD = 1, EV_DATA = 2, EV_END = 3, EV_ERROR = 4, EV_COMPLETE = 5, EV_DRAIN = 6 };
+
+// (A body sent as it is read: past this much waiting to be written,
+// fetchWrite says to wait for DRAIN.)
+#define WRITE_HIGH (64 * 1024)
 enum { R_CONNECT, R_HEAD, R_BODY, R_DONE };
 enum { ENC_NONE, ENC_GZIP, ENC_DEFLATE, ENC_BR, ENC_ZSTD };
 
@@ -64,9 +69,12 @@ typedef struct {
     bool reject;
     char servername[256];
     // The request's bytes, and how many are written (the buffers are kept
-    // for the slot's next request).
+    // for the slot's next request). A body sent as it is read (`streaming`)
+    // is appended in chunks; `want_drain`: DRAIN is owed once they are
+    // written.
     char *out;
     size_t out_len, out_off, out_cap;
+    bool streaming, want_drain, streamed_all;
     // Response bytes not parsed yet (the head; chunked framing).
     char *in;
     size_t in_len, in_cap;
@@ -296,6 +304,10 @@ static int finish(uint32_t i) {
     struct us_socket_t *s = r->s;
     r->s = NULL;
     r->state = R_DONE;
+    // (A body sent as it is read and not all sent: the server's reading of
+    // it would not end.)
+    if (r->streaming && (!r->streamed_all || r->out_off < r->out_len))
+        r->keep_alive = false;
     if (s && !us_socket_is_closed(s)) {
         ext_of(s)->req = -1;
         if (r->keep_alive && nidle < MAX_IDLE) {
@@ -907,6 +919,15 @@ static void tls_flush(struct us_socket_t *s) {
 
 static void write_out(uint32_t i);
 
+// A request's bytes not written to the socket yet (over TLS, the
+// ciphertext).
+static size_t queued(Req *r) {
+    size_t n = r->out_len - r->out_off;
+    if (r->s && !us_socket_is_closed(r->s))
+        n += ext_of(r->s)->pend_len;
+    return n;
+}
+
 // Goes on with the handshake of request i's connection: true once it is
 // done and the certificate good (false: wait, or the request failed).
 static bool tls_handshake(uint32_t i, struct us_socket_t *s) {
@@ -1020,12 +1041,17 @@ static void write_out(uint32_t i) {
         while (r->out_off < r->out_len) {
             int n = us_socket_write(r->s, r->out + r->out_off, (int)(r->out_len - r->out_off));
             if (n <= 0)
-                return;
+                break;
             r->out_off += (size_t)n;
         }
     }
-    if (r->state == R_CONNECT)
+    if (r->state == R_CONNECT && r->out_off == r->out_len)
         r->state = R_HEAD;
+    if (r->want_drain && queued(r) < WRITE_HIGH) {
+        r->want_drain = false;
+        JSValue argv[1] = {JS_NewInt32(beyond_js_context(), EV_DRAIN)};
+        emit(i, 1, argv);
+    }
 }
 
 static struct us_socket_t *on_open(struct us_socket_t *s, int is_client, char *ip, int ip_length) {
@@ -1049,11 +1075,9 @@ static struct us_socket_t *on_open(struct us_socket_t *s, int is_client, char *i
 static struct us_socket_t *on_writable(struct us_socket_t *s) {
     Ext *e = ext_of(s);
     int32_t i = e->req;
-    if (e->ssl) {
+    if (e->ssl)
         tls_flush(s);
-        return s;
-    }
-    if (i >= 0 && (uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s)
+    if (i >= 0 && (uint32_t)i < nreqs && reqs[i]->live && reqs[i]->s == s && (!e->ssl || e->handshaken))
         write_out((uint32_t)i);
     return s;
 }
@@ -1179,7 +1203,9 @@ static const struct us_socket_vtable_t vtable = {
 // one.
 static void start(uint32_t i) {
     Req *r = reqs[i];
-    for (int k = nidle - 1; k >= 0; k--) {
+    // (A body sent as it is read cannot be sent again on a new connection if
+    // an idle one turns out closed: it takes a new one.)
+    for (int k = r->streaming ? -1 : nidle - 1; k >= 0; k--) {
         if (!strcmp(idle[k].key, r->key)) {
             struct us_socket_t *s = idle[k].s;
             idle[k] = idle[--nidle];
@@ -1263,7 +1289,8 @@ static JSValue js_fetch_init(JSContext *ctx, JSValueConst this_val, int argc, JS
 
 // fetchRequest(task, host, port, head, body, headOnly, tls): the request's
 // handle. `head` is the request line and headers (a string or bytes), `body`
-// its bytes or null; `tls` null for http:, else { ca (PEM text, or null for
+// its bytes, null, or true when it is sent as it is read (fetchWrite,
+// fetchEnd); `tls` null for http:, else { ca (PEM text, or null for
 // the bundled roots), reject (whether to check the certificate), servername
 // (or null) }.
 static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1277,9 +1304,13 @@ static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc,
     size_t hl, bl;
     const char *ho, *bo;
     const uint8_t *head = bytes_of(ctx, argv[3], &hl, &ho);
-    const uint8_t *bodyb = bytes_of(ctx, argv[4], &bl, &bo);
+    bool streaming = JS_IsBool(argv[4]) && JS_ToBool(ctx, argv[4]);
+    const uint8_t *bodyb = streaming ? NULL : bytes_of(ctx, argv[4], &bl, &bo);
+    if (streaming)
+        bl = 0, bo = NULL;
     uint32_t i = req_alloc();
     Req *r = reqs[i];
+    r->streaming = streaming;
     size_t n = host_len < sizeof r->host - 1 ? host_len : sizeof r->host - 1;
     memcpy(r->host, host, n);
     r->host[n] = 0;
@@ -1350,6 +1381,67 @@ static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc,
     return JS_NewFloat64(ctx, h);
 }
 
+// fetchWrite(handle, bytes): a chunk of a body sent as it is read: -1 if
+// the request is gone, else 1, or 0 when to wait for DRAIN before more.
+static JSValue js_fetch_write(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Req *r = req_of(h, &i);
+    if (!r || !r->streaming || r->state == R_DONE)
+        return JS_NewInt32(ctx, -1);
+    size_t len;
+    const char *owned;
+    const uint8_t *b = bytes_of(ctx, argv[1], &len, &owned);
+    if (b && len) {
+        // (Framed as a chunk: its size in hex, CRLF, the bytes, CRLF.)
+        char size[24];
+        int sl = snprintf(size, sizeof size, "%zx\r\n", len);
+        if (r->out_off == r->out_len)
+            r->out_off = r->out_len = 0;
+        if (!reserve((uint8_t **)&r->out, &r->out_cap, r->out_len + sl + len + 2)) {
+            if (owned)
+                JS_FreeCString(ctx, owned);
+            return JS_ThrowOutOfMemory(ctx);
+        }
+        memcpy(r->out + r->out_len, size, sl);
+        memcpy(r->out + r->out_len + sl, b, len);
+        memcpy(r->out + r->out_len + sl + len, "\r\n", 2);
+        r->out_len += sl + len + 2;
+    }
+    if (owned)
+        JS_FreeCString(ctx, owned);
+    if (r->s && !us_socket_is_closed(r->s) && (!ext_of(r->s)->ssl || ext_of(r->s)->handshaken))
+        write_out(i);
+    r = req_of(h, &i);
+    if (!r)
+        return JS_NewInt32(ctx, -1);
+    if (queued(r) < WRITE_HIGH)
+        return JS_NewInt32(ctx, 1);
+    r->want_drain = true;
+    return JS_NewInt32(ctx, 0);
+}
+
+// fetchEnd(handle): the end of a body sent as it is read.
+static JSValue js_fetch_end(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Req *r = req_of(h, &i);
+    if (!r || !r->streaming || r->state == R_DONE)
+        return JS_FALSE;
+    if (!reserve((uint8_t **)&r->out, &r->out_cap, r->out_len + 5))
+        return JS_ThrowOutOfMemory(ctx);
+    memcpy(r->out + r->out_len, "0\r\n\r\n", 5);
+    r->out_len += 5;
+    r->streamed_all = true;
+    if (r->s && !us_socket_is_closed(r->s) && (!ext_of(r->s)->ssl || ext_of(r->s)->handshaken))
+        write_out(i);
+    return JS_TRUE;
+}
+
 // fetchAbort(handle): the request ends with no more events (its connection
 // closed).
 static JSValue js_fetch_abort(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1392,6 +1484,8 @@ static JSValue js_fetch_pause(JSContext *ctx, JSValueConst this_val, int argc, J
 const JSCFunctionListEntry beyond_client_functions[] = {
     JS_CFUNC_DEF("fetchInit", 1, js_fetch_init),
     JS_CFUNC_DEF("fetchRequest", 7, js_fetch_request),
+    JS_CFUNC_DEF("fetchWrite", 2, js_fetch_write),
+    JS_CFUNC_DEF("fetchEnd", 1, js_fetch_end),
     JS_CFUNC_DEF("fetchAbort", 1, js_fetch_abort),
     JS_CFUNC_DEF("fetchPause", 2, js_fetch_pause),
 };

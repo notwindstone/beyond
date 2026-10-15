@@ -7,8 +7,20 @@
 // unless `redirect` says otherwise; an AbortSignal aborts the request, or
 // the body being read.
 
-import { decodeUtf8, encodeUtf8, fetchAbort, fetchInit, fetchPause, fetchRequest, promiseNew, promiseSettle } from "beyond:native";
+import {
+  decodeUtf8,
+  encodeUtf8,
+  fetchAbort,
+  fetchEnd,
+  fetchInit,
+  fetchPause,
+  fetchRequest,
+  fetchWrite,
+  promiseNew,
+  promiseSettle,
+} from "beyond:native";
 import { Headers, Incoming, Request, Response } from "./fetch.ts";
+import { chunkBytes, ReadableStream, ReadableStreamDefaultReader } from "./streams.ts";
 import { URL } from "./url.ts";
 
 const EV_HEAD = 1;
@@ -16,6 +28,7 @@ const EV_DATA = 2;
 const EV_END = 3;
 const EV_ERROR = 4;
 const EV_COMPLETE = 5;
+const EV_DRAIN = 6;
 
 // What failed (client.c): the connection or the response, connecting, or
 // resolving the host.
@@ -170,7 +183,10 @@ class Target {
   }
 }
 
-/** A request's head: its request line and headers, Bun's defaults added. */
+/**
+ * A request's head: its request line and headers, Bun's defaults added
+ * (`bodyLength` -1: a body sent as it is read, chunked).
+ */
 function head(method: string, url: URL, headers: Headers | null, bodyLength: number): string {
   let out = `${method} ${url.pathname}${url.search} HTTP/1.1\r\n`;
   let host = false;
@@ -196,7 +212,8 @@ function head(method: string, url: URL, headers: Headers | null, bodyLength: num
   if (!accept) out += "Accept: */*\r\n";
   if (!host) out += `Host: ${url.host}\r\n`;
   if (!encoding) out += "Accept-Encoding: gzip, deflate, br, zstd\r\n";
-  if (bodyLength > 0 || (method !== "GET" && method !== "HEAD" && method !== "OPTIONS")) {
+  if (bodyLength < 0) out += "Transfer-Encoding: chunked\r\n";
+  else if (bodyLength > 0 || (method !== "GET" && method !== "HEAD" && method !== "OPTIONS")) {
     out += `Content-Length: ${bodyLength}\r\n`;
   }
   return out + "\r\n";
@@ -225,6 +242,10 @@ class Fetch {
   method: string;
   headers: Headers | null;
   body: Uint8Array | null;
+  // A body sent as it is read, and what waits for the connection to take
+  // more of it.
+  stream: ReadableStream<any> | null = null;
+  drained: (() => void) | null = null;
   redirect: string;
   signal: AbortSignal | null;
   tls: TLSConfig;
@@ -282,9 +303,42 @@ class Fetch {
       }
       bytes = h;
     } else {
-      bytes = head(method, t.url, this.headers, body === null ? 0 : body.length);
+      bytes = head(method, t.url, this.headers, this.stream !== null ? -1 : body === null ? 0 : body.length);
     }
-    this.handle = fetchRequest(this, t.host, t.port, bytes, body, method === "HEAD", t.protocol === "https:" ? this.tls : null);
+    const tls = t.protocol === "https:" ? this.tls : null;
+    if (this.stream !== null) {
+      this.handle = fetchRequest(this, t.host, t.port, bytes, true, false, tls);
+      this.pump(this.stream, this.handle);
+    } else {
+      this.handle = fetchRequest(this, t.host, t.port, bytes, body, method === "HEAD", tls);
+    }
+  }
+
+  /** Sends `stream` as the body of request `handle`, as it is read. */
+  async pump(stream: ReadableStream<any>, handle: number): Promise<void> {
+    const reader = new ReadableStreamDefaultReader<any>(stream);
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const written = fetchWrite(handle, chunkBytes(value));
+        if (written < 0) {
+          // (The request is over: its response came, or it failed.)
+          reader.cancel(undefined).catch(() => {});
+          return;
+        }
+        if (written === 0) await new Promise<void>((resolve) => (this.drained = resolve));
+      }
+      fetchEnd(handle);
+    } catch (e) {
+      // (Reading the body failed: so does the request.)
+      if (this.handle === handle && !this.done) {
+        fetchAbort(handle);
+        this.settle();
+        if (this.response === null) this.reject(e);
+        else if (this.incoming !== null) this.incoming.fail(e);
+      }
+    }
   }
 
   resolve(r: Response): void {
@@ -427,6 +481,11 @@ function onEvent(task: Fetch, type: number, a: any, b: any, c: any, d: any): voi
   if (type === EV_COMPLETE) task.head(a as number, b as string, c as string[], d as ArrayBuffer, true);
   else if (type === EV_HEAD) task.head(a as number, b as string, c as string[], null, false);
   else if (type === EV_DATA) (task.incoming as Incoming).push(a as Uint8Array);
+  else if (type === EV_DRAIN) {
+    const d = task.drained;
+    task.drained = null;
+    if (d !== null) d();
+  }
   else if (type === EV_END) {
     task.settle();
     if (task.incoming !== null) task.incoming.end();
@@ -484,6 +543,15 @@ export function fetch(input: string | URL | Request, init?: FetchInit): Promise<
   const headers = req._headers === null && req._flat === null ? null : new Headers(req.headers);
   if (req._body === null && req._stream === null) {
     return new Fetch(t, req.method, headers, null, redirect, signal, tls).start();
+  }
+  // (A stream: sent as it is read, as Bun's, chunked.)
+  if (req._stream !== null && !req._streamOfBody) {
+    const s = req._stream;
+    if (s._disturbed || s._reader !== undefined) return Promise.reject(new TypeError("Body already used"));
+    req._used = true;
+    const task = new Fetch(t, req.method, headers, null, redirect, signal, tls);
+    task.stream = s;
+    return task.start();
   }
   // The request's body, read whole.
   return req.bytes().then((bytes) => new Fetch(t, req.method, headers, bytes, redirect, signal, tls).start());
