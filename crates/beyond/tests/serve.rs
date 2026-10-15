@@ -98,6 +98,37 @@ fn serve() {
     assert_eq!(big.len(), 64 * 65536);
     assert!(big.starts_with('a') && big.ends_with('l'), "{}", &big[big.len() - 10..]);
 
+    // Streams that hold their whole body: sent whole.
+    let (head, body) = get(port, "/rewrap");
+    assert!(head.contains(&"content-length: 3".into()), "{head:?}");
+    assert!(head.contains(&"x-from: first".into()), "{head:?}");
+    assert!(head.contains(&"content-type: application/octet-stream".into()), "{head:?}");
+    assert!(!head.iter().any(|h| h.starts_with("transfer-encoding")), "{head:?}");
+    assert_eq!(body, "abc");
+    let (head, body) = get(port, "/blob-stream");
+    assert!(head.contains(&"content-length: 4".into()), "{head:?}");
+    assert!(head.contains(&"content-type: text/x-blob".into()), "{head:?}");
+    assert_eq!(body, "blob");
+    let (head, body) = get(port, "/whole");
+    assert!(head.contains(&"content-length: 3".into()), "{head:?}");
+    assert!(!head.iter().any(|h| h.starts_with("content-type")), "{head:?}");
+    assert_eq!(body, "who");
+
+    // The program's framing headers are not sent; default content types.
+    let (head, body) = get(port, "/framing");
+    assert_eq!(head.iter().filter(|h| h.starts_with("content-length")).count(), 1, "{head:?}");
+    assert!(head.contains(&"content-length: 2".into()), "{head:?}");
+    assert!(!head.iter().any(|h| h.starts_with("transfer-encoding")), "{head:?}");
+    assert!(head.contains(&"content-type: text/plain;charset=utf-8".into()), "{head:?}");
+    assert!(head.contains(&"x-a: 1".into()), "{head:?}");
+    assert_eq!(body, "hi");
+    let (head, _) = get(port, "/bytes");
+    assert!(head.contains(&"content-type: application/octet-stream".into()), "{head:?}");
+    let (head, body) = get(port, "/empty");
+    assert!(head.contains(&"content-length: 0".into()), "{head:?}");
+    assert!(!head.iter().any(|h| h.starts_with("content-type")), "{head:?}");
+    assert_eq!(body, "");
+
     let (_, body) = get(port, "/generator");
     assert_eq!(dechunk(&body).as_deref(), Some("xy"));
 

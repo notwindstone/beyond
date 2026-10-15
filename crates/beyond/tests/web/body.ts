@@ -56,3 +56,37 @@ console.log({ r: new Response("x") });
 const k = new Headers(); k.append("Cookie", "a=1"); k.append("cookie", "b=2"); k.append("x", "1"); k.append("x", "2");
 console.log(k.get("cookie"), k.get("x"), [...k], k);
 console.log(new Headers({ "10": "a", z: "b", "2": "c" }).toJSON());
+
+// Bodies as streams, re-made into responses (as middleware does: `new
+// Response(res.body, res)`): their Blobs' types, and the headers made after.
+{
+  const b = new Blob(["x"], { type: "text/x-foo" });
+  const r1 = new Response(b);
+  const r2 = new Response(r1.body, r1);
+  console.log([...r1.headers], [...r2.headers], (await r2.blob()).type);
+  const r3 = new Response(b, { headers: { a: "1" } });
+  console.log([...r3.headers]);
+  const r4 = new Response("hi");
+  const r5 = new Response(r4.body, r4);
+  console.log(r4.bodyUsed, await r5.text(), r4.bodyUsed);
+  console.log((await new Response(new Response("hi").body).blob()).type, (await new Response(b.stream()).blob()).type);
+  console.log((await new Response(new Uint8Array([1]).buffer).blob()).type === "", (await new Response(new Response(new Uint8Array([1])).body).blob()).type === "");
+  const r6 = new Response("hi", { headers: { "x-a": "1" } });
+  console.log([...r6.headers], r6.headers.get("content-type"), (await r6.blob()).type);
+  const q = new Request("http://x/", { method: "POST", body: new Blob(["abc"], { type: "text/x-r" }) });
+  const qs = q.body;
+  console.log([...q.headers], (await new Response(qs).blob()).type);
+}
+
+// The types of bodies' Blobs: as given, else text for stored bodies and
+// their streams, a Blob's stream's its own.
+{
+  const types = async (r: Response) => JSON.stringify((await r.blob()).type);
+  console.log(await types(new Response(new Uint8Array([1]).buffer)), await types(new Response(new Uint8Array([1]))));
+  console.log(await types(new Response(new Response(new Uint8Array([1])).body)), await types(new Response(new Blob(["x"]).stream())));
+  console.log(await types(new Response(new Blob(["x"]))), await types(new Response(null)), await types(new Response(new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1])); c.close(); } }))));
+  console.log(await types(new Response(new URLSearchParams("a=1"))), await types(new Response(new Response(new URLSearchParams("a=1")).body)));
+  console.log(await types(new Response("x", { headers: { "content-type": "Text/X; Charset=UTF-8" } })), await types(new Response(new Blob(["x"], { type: "Text/Y" }))));
+  const req = async (r: Request) => JSON.stringify((await r.blob()).type);
+  console.log(await req(new Request("http://x/", { method: "POST", body: new Uint8Array([1]) })), await req(new Request("http://x/", { method: "POST", body: "s" })));
+}

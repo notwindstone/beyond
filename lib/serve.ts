@@ -16,7 +16,7 @@ import {
   writeChunk,
 } from "beyond:native";
 import { Incoming, IncomingOwner, Request, Response } from "./fetch.ts";
-import { chunkBytes, ReadableStream, ReadableStreamDefaultReader, readableStreamCancel } from "./streams.ts";
+import { chunkBytes, ReadableStream, ReadableStreamDefaultReader, readableStreamCancel, takeWholeStream } from "./streams.ts";
 
 export interface ServeOptions {
   port?: number | string;
@@ -103,11 +103,58 @@ function send(handle: number, res: unknown): void {
   // (A stream `body` made of the stored body, unread: the stored body.)
   if (stream === null || (res._streamOfBody && !stream._disturbed && stream._reader === undefined)) {
     // (Most responses have no headers object: only a content type.)
-    if (res._headers === null && res._rawHeaders === null) respond(handle, res.status, res.statusText, null, res._body, res._contentType ?? res._defaultType);
+    if (res._headers === null && res._rawHeaders === null) respond(handle, res.status, res.statusText, null, res._body, res._contentType ?? res._sendType());
     else respond(handle, res.status, res.statusText, res._flat(), res._body, null);
     return;
   }
+  // (A stream that holds its whole body, as one made of another body
+  // (`new Response(res.body, res)`, as middleware re-making a response
+  // does) or of a Blob: sent whole, with its length, as Bun's. A stream of
+  // a body has the content type of its Blob.)
+  const whole = takeWholeStream(stream);
+  if (whole !== null) {
+    let body: Uint8Array;
+    try {
+      body = joinChunks(whole);
+    } catch (e) {
+      send(handle, internalError(e));
+      return;
+    }
+    res._used = true;
+    if (res._headers === null && res._rawHeaders === null) {
+      respond(handle, res.status, res.statusText, null, body, res._contentType ?? stream._sendType);
+      return;
+    }
+    const flat = res._flat();
+    if (stream._sendType !== null && !hasContentType(flat)) flat.push("content-type", stream._sendType);
+    respond(handle, res.status, res.statusText, flat, body, null);
+    return;
+  }
   sendStream(handle, res, stream);
+}
+
+/** A whole stream's chunks as one body. */
+function joinChunks(chunks: any[]): Uint8Array {
+  if (chunks.length === 1) return chunkBytes(chunks[0]);
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for (const c of chunks) {
+    const b = chunkBytes(c);
+    parts.push(b);
+    size += b.length;
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const b of parts) {
+    all.set(b, at);
+    at += b.length;
+  }
+  return all;
+}
+
+function hasContentType(flat: string[]): boolean {
+  for (let i = 0; i < flat.length; i += 2) if (flat[i] === "content-type") return true;
+  return false;
 }
 
 /** Waits until the connection takes more (false: the request is gone). */

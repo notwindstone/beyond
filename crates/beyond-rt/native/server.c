@@ -494,8 +494,9 @@ typedef struct {
     bool ok;
 } Reply;
 
-// The status line and headers (`stream`: without the framing headers, for a
-// chunked body).
+// The status line and headers, without the framing headers the program
+// gave (Content-Length, Transfer-Encoding: as Bun's, the body's own are
+// written, by uWebSockets).
 static void write_head(Reply *r, bool stream) {
     JSContext *ctx = r->ctx;
     uws_res_t *res = r->s->res;
@@ -521,9 +522,8 @@ static void write_head(Reply *r, bool stream) {
         JSValue kv = JS_GetPropertyInt64(ctx, r->headers, k), vv = JS_GetPropertyInt64(ctx, r->headers, k + 1);
         size_t kl, vl;
         const char *ks = JS_ToCStringLen(ctx, &kl, kv), *vs = JS_ToCStringLen(ctx, &vl, vv);
-        bool framing = stream && ks &&
-                       ((kl == 14 && !strncasecmp(ks, "content-length", 14)) ||
-                        (kl == 17 && !strncasecmp(ks, "transfer-encoding", 17)));
+        bool framing = ks && ((kl == 14 && !strncasecmp(ks, "content-length", 14)) ||
+                              (kl == 17 && !strncasecmp(ks, "transfer-encoding", 17)));
         if (ks && vs && !framing)
             uws_res_write_header(0, res, ks, kl, vs, vl);
         JS_FreeCString(ctx, ks);

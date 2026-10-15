@@ -52,6 +52,30 @@ const server = Beyond.serve({
       );
     }
     if (path === "/pipe") return new Response(req.body);
+    // Streams that hold their whole body: sent whole, with their length (a
+    // body's stream, as middleware re-making a response has it; a Blob's;
+    // one its source filled and closed), as Bun's.
+    if (path === "/rewrap") {
+      const r = new Response("abc", { headers: { "x-from": "first" } });
+      return new Response(r.body, r);
+    }
+    if (path === "/blob-stream") return new Response(new Blob(["blob"], { type: "text/x-blob" }).stream());
+    if (path === "/whole") {
+      return new Response(
+        new ReadableStream({
+          start(c) {
+            c.enqueue(new TextEncoder().encode("w"));
+            c.enqueue("ho");
+            c.close();
+          },
+        }),
+      );
+    }
+    // The framing headers the program gives are not sent (the body's are);
+    // a body's default content type, as Bun's.
+    if (path === "/framing") return new Response("hi", { headers: { "content-length": "7", "transfer-encoding": "chunked", "x-a": "1" } });
+    if (path === "/bytes") return new Response(new Uint8Array([104, 105]));
+    if (path === "/empty") return new Response("");
     if (path === "/count") {
       let n = 0;
       for await (const chunk of req.body!) {

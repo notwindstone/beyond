@@ -274,6 +274,13 @@ export class ReadableStream<R = any> {
   _storedError: any = undefined;
   _disturbed = false;
   _controller!: ReadableStreamDefaultController<R> | ReadableByteStreamController;
+  // A stream of a body's or a Blob's bytes (Bun's are of a Blob): that
+  // Blob's type, and the content type a response sends it with if it has
+  // none of its own (null: another stream).
+  _blobType: string | null = null;
+  _sendType: string | null = null;
+  // A request's body the server received (see Body._received).
+  _received = false;
 
   constructor(underlyingSource?: UnderlyingSource<R> | null, strategy?: QueuingStrategy<R>) {
     if (underlyingSource !== undefined && !isObject(underlyingSource)) throw new TypeError("The underlying source must be an object");
@@ -2815,6 +2822,29 @@ function transformSourceCancel(stream: TransformStream<any, any>, reason: any): 
 // ---- Bodies ----
 
 /** A stream of `bytes` (one chunk, then closed). */
+/**
+ * The chunks of a stream that holds its whole body (not locked or read,
+ * every chunk queued and its close requested: a body's stream, a Blob's, or
+ * one whose source enqueued it all and closed), taken: the stream is then
+ * read and closed, as a reader reading it to its end would leave it. Else
+ * null (a stream still to be read).
+ */
+export function takeWholeStream(stream: ReadableStream<any>): any[] | null {
+  if (stream._reader !== undefined || stream._disturbed || stream._received) return null;
+  if (stream._state === "closed") {
+    stream._disturbed = true;
+    return [];
+  }
+  const c = stream._controller;
+  if (stream._state !== "readable" || !(c instanceof ReadableStreamDefaultController) || !c._closeRequested) return null;
+  const chunks = c._queue.map((pair) => pair.value);
+  stream._disturbed = true;
+  resetQueue(c);
+  clearAlgorithms(c);
+  readableStreamClose(stream);
+  return chunks;
+}
+
 export function streamOfBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
   const stream = createReadableStream<Uint8Array>(noop, () => resolved(), () => resolved(), 0);
   if (bytes.length > 0) controllerEnqueue(stream._controller, bytes);

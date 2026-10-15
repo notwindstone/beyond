@@ -132,7 +132,11 @@ export class Blob {
   }
 
   stream(): ReadableStream<Uint8Array> {
-    return streamOfBytes(this._bytes.slice());
+    const s = streamOfBytes(this._bytes.slice());
+    // (As Bun's: its type, else text; sent as an octet stream without one.)
+    s._blobType = this._type !== "" ? this._type : "text/plain;charset=utf-8";
+    s._sendType = this._type !== "" ? this._type : "application/octet-stream";
+    return s;
   }
 
   get [Symbol.toStringTag](): string {

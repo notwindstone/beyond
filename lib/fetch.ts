@@ -308,10 +308,14 @@ export class Headers {
 /** A body as stored: a string, the bytes, or none. */
 type Stored = string | ArrayBuffer | null;
 
-// The content type the last body `store` took has, if any, and the stream
-// it is (set by `store`).
+// The content type the last body `store` took has, if any, the stream it
+// is, and the type it is sent with when the response has none (set by
+// `store`).
 let extractedType: string | null = null;
 let extractedStream: ReadableStream<any> | null = null;
+let extractedDefault: string | null = null;
+
+const OCTET = "application/octet-stream";
 
 /** The bytes of a Uint8Array, as an ArrayBuffer (the same one if it is whole). */
 function bufferOf(b: Uint8Array): ArrayBuffer {
@@ -325,14 +329,25 @@ function bufferOf(b: Uint8Array): ArrayBuffer {
 function store(body: BodyInit | undefined): Stored {
   extractedType = null;
   extractedStream = null;
+  extractedDefault = null;
   if (body === undefined || body === null) return null;
-  if (typeof body === "string") return body;
-  if (body instanceof ArrayBuffer) return body;
+  // (As Bun's: text for a string or a Blob without a type, an octet stream
+  // for bytes.)
+  if (typeof body === "string") {
+    extractedDefault = TEXT;
+    return body;
+  }
+  if (body instanceof ArrayBuffer) {
+    extractedDefault = OCTET;
+    return body;
+  }
   if (ArrayBuffer.isView(body)) {
+    extractedDefault = OCTET;
     return (body.buffer as ArrayBuffer).slice(body.byteOffset, body.byteOffset + body.byteLength);
   }
   if (body instanceof Blob) {
     if (body.type !== "") extractedType = body.type;
+    else extractedDefault = TEXT;
     return bufferOf(body._bytes);
   }
   if (body instanceof FormData) {
@@ -357,6 +372,7 @@ function store(body: BodyInit | undefined): Stored {
     extractedStream = ReadableStream.from(b);
     return null;
   }
+  extractedDefault = TEXT;
   return String(body);
 }
 
@@ -531,6 +547,11 @@ class Body {
   _used = false;
   // A body arriving (no stream made of it yet).
   _incoming: Incoming | null = null;
+  // The content type that comes with the stored body (a Blob's, a form's).
+  _bodyType: string | null = null;
+  // A request the server received: its body's stream is read from the
+  // connection, as Bun's (never sent whole, as a stored body's is).
+  _received = false;
 
   constructor(body: Stored) {
     this._body = body;
@@ -548,7 +569,16 @@ class Body {
         if (this._body === null) return null;
         s = streamOfBytes(this._used ? new Uint8Array(0) : storedBytes(this._body));
         this._streamOfBody = true;
+        if (!this._received) {
+          // (As Bun's, a stream of the body's Blob: its type, else text,
+          // and sent as an octet stream when it has none.)
+          const t = this._bodyType;
+          s._blobType = t ?? TEXT;
+          s._sendType = t ?? OCTET;
+          this._bodyStreamMade();
+        }
       }
+      if (this._received) s._received = true;
       // (A body already read: its stream is locked, as Bun's.)
       if (this._used) {
         s._disturbed = true;
@@ -650,9 +680,19 @@ class Body {
     return null;
   }
 
+  /** After `body` made a stream of the stored body (overridden: Response). */
+  _bodyStreamMade(): void {}
+
+  /** The content type the body was given (overridden: Response). */
+  _givenType(): string | null {
+    return this._mime();
+  }
+
   async blob(): Promise<Blob> {
-    const type = this._mime() ?? "";
-    return Blob._of(await this.bytes(), type.toLowerCase());
+    // (As Bun's: the type the body was given, as given; else a stored
+    // body's is text, and a stream's that of the Blob it is of.)
+    const type = this._givenType() ?? (this._body !== null ? TEXT : (this._stream?._blobType ?? ""));
+    return Blob._of(await this.bytes(), type);
   }
 
   async formData(): Promise<FormData> {
@@ -694,6 +734,9 @@ export class Response extends Body {
   // headers have none (as Bun's, not in the headers).
   _contentType: string | null = null;
   _defaultType: string | null = null;
+  // The content type the body is sent with when the response has none (a
+  // string's, a Blob's, bytes'; not an empty body's), as Bun's.
+  _sendDefault: string | null = null;
   // (fetch()'s: the URL it answers, whether redirects led there, and the
   // headers as they came, [name, value, ...], until `headers` is read.)
   _url = "";
@@ -717,15 +760,36 @@ export class Response extends Body {
     this.status = status;
     this.statusText = statusText;
     const type = extractedType;
+    this._bodyType = type;
     if (headers !== undefined) {
       const h = new Headers(headers);
       if (type !== null && !h.has("content-type")) h.append("content-type", type);
       this._headers = h;
     } else if (type !== null) {
       this._contentType = type;
-    } else if (typeof this._body === "string") {
-      this._defaultType = TEXT;
     }
+    // (A string's type, not in the headers, as Bun's: sent if they have
+    // none, and its Blob's.)
+    if (type === null && typeof this._body === "string") this._defaultType = TEXT;
+    if (type === null) this._sendDefault = extractedDefault;
+  }
+
+  /** The content type sent when the headers have none. */
+  _sendType(): string | null {
+    const b = this._body;
+    if (b === null || (typeof b === "string" ? b.length === 0 : b.byteLength === 0)) return null;
+    return this._sendDefault;
+  }
+
+  _givenType(): string | null {
+    const h = this._headers ?? (this._rawHeaders !== null ? this.headers : null);
+    return h !== null ? h.get("content-type") : this._contentType;
+  }
+
+  _bodyStreamMade(): void {
+    // (As Bun's: the body's content type, not in the headers yet, goes with
+    // its stream; the headers made after it do not have it.)
+    if (this._headers === null && this._contentType !== null && this._contentType === this._bodyType) this._contentType = null;
   }
 
   _mime(): string | null {
@@ -755,11 +819,12 @@ export class Response extends Body {
   _flat(): string[] {
     const h = this._headers ?? (this._rawHeaders !== null ? this.headers : null);
     if (h === null) {
-      const type = this._contentType ?? this._defaultType;
+      const type = this._contentType ?? this._sendType();
       return type === null ? [] : ["content-type", type];
     }
     const flat = h._flat();
-    if (this._defaultType !== null && !h.has("content-type")) flat.push("content-type", this._defaultType);
+    const type = this._sendType();
+    if (type !== null && !h.has("content-type")) flat.push("content-type", type);
     return flat;
   }
 
@@ -784,6 +849,7 @@ export class Response extends Body {
     const r = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers });
     this._cloneBodyTo(r);
     r._defaultType = this._defaultType;
+    r._sendDefault = this._sendDefault;
     r._url = this._url;
     r._redirected = this._redirected;
     return r;
@@ -792,6 +858,7 @@ export class Response extends Body {
   static json(data: any, init?: ResponseInit): Response {
     const r = new Response(JSON.stringify(data), init);
     r._defaultType = null;
+    r._sendDefault = null;
     if (r._headers === null) r._contentType = JSON_TYPE;
     else if (!r._headers.has("content-type")) r._headers.set("content-type", JSON_TYPE);
     return r;
@@ -883,6 +950,7 @@ export class Request extends Body {
     if (init !== undefined && init.method !== undefined) method = normalizeMethod(init.method);
     this.method = method;
     const type = extractedType;
+    if (init !== undefined && init.body !== undefined) this._bodyType = type;
     if (init !== undefined && init.headers !== undefined) this._headers = new Headers(init.headers);
     else if (from !== null) this._headers = new Headers(from.headers);
     if (type !== null && init !== undefined && init.body !== undefined) {
@@ -900,6 +968,7 @@ export class Request extends Body {
     if (method !== "GET") (r as any).method = method;
     if (body !== undefined) r._body = body;
     r._flat = flat;
+    r._received = true;
     return r;
   }
 

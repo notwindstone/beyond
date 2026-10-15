@@ -157,3 +157,22 @@ a=1; b=2 1, 2 [
   "10": "a",
   z: "b",
 }
+[] [] text/x-foo
+[
+  [ "a", "1" ], [ "content-type", "text/x-foo" ]
+]
+false hi true
+text/plain;charset=utf-8 text/x-foo
+false false
+[
+  [ "x-a", "1" ]
+] null text/plain;charset=utf-8
+[
+  [ "content-type", "text/x-r" ]
+] text/x-r
+"text/plain;charset=utf-8" "text/plain;charset=utf-8"
+"text/plain;charset=utf-8" "text/plain;charset=utf-8"
+"text/plain;charset=utf-8" "" ""
+"application/x-www-form-urlencoded;charset=UTF-8" "application/x-www-form-urlencoded;charset=UTF-8"
+"Text/X; Charset=UTF-8" "text/y"
+"text/plain;charset=utf-8" "text/plain;charset=utf-8"
