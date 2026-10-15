@@ -174,7 +174,11 @@ generator shares the cores). What got it there:
 - Two engine fast paths in Luminous's patch: `instanceof` without calling
   `Symbol.hasInstance` when it cannot have been replaced, and
   `JSON.stringify` of plain data straight from object shapes (a small
-  object's went from about 8,800 instructions to a few hundred).
+  object's went from about 8,800 instructions to a few hundred), into a
+  buffer kept between calls, with numbers written in place. Objects of an
+  `aot type`, and arrays of them, are written from their fields: a small
+  one in about the time Bun takes, 100 of them in about half
+  (`Response.json` of them too).
 
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
