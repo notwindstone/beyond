@@ -653,24 +653,22 @@ const SPECIAL = new Map<string, number>([
 ]);
 
 /**
- * The special scheme `input[0..end]` is, in lower case, or null: a constant,
- * so that the fast path makes no string for it.
+ * The special scheme `input[0..end]` is (in lower case), or null: a
+ * constant, so that the fast path makes no string for it.
  */
 function specialScheme(input: string, end: number): string | null {
-  const a = input.charCodeAt(0) | 0x20;
-  const b = input.charCodeAt(1) | 0x20;
-  if (end === 4 && a === 0x68 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x74 && (input.charCodeAt(3) | 0x20) === 0x70) {
-    return "http";
+  const a = input.charCodeAt(0);
+  const b = input.charCodeAt(1);
+  const c = input.charCodeAt(2);
+  if (a === 0x68 && b === 0x74 && c === 0x74 && input.charCodeAt(3) === 0x70) {
+    if (end === 4) return "http";
+    if (end === 5 && input.charCodeAt(4) === 0x73) return "https";
+  } else if (a === 0x77 && b === 0x73) {
+    if (end === 2) return "ws";
+    if (end === 3 && c === 0x73) return "wss";
+  } else if (end === 3 && a === 0x66 && b === 0x74 && c === 0x70) {
+    return "ftp";
   }
-  if (
-    end === 5 && a === 0x68 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x74 && (input.charCodeAt(3) | 0x20) === 0x70 &&
-    (input.charCodeAt(4) | 0x20) === 0x73
-  ) {
-    return "https";
-  }
-  if (end === 2 && a === 0x77 && b === 0x73) return "ws";
-  if (end === 3 && a === 0x77 && b === 0x73 && (input.charCodeAt(2) | 0x20) === 0x73) return "wss";
-  if (end === 3 && a === 0x66 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x70) return "ftp";
   return null;
 }
 
@@ -998,7 +996,7 @@ function fastParse(input: string, base: Record | null): Record | null {
     i++;
   }
   if (i + 2 >= len || input.charCodeAt(i + 1) !== 0x2f || input.charCodeAt(i + 2) !== 0x2f) return null;
-  const scheme = specialScheme(input, i);
+  const scheme = specialScheme(same ? input : input.slice(0, i).toLowerCase(), i);
   if (scheme === null) return null;
   const defaultPort = scheme === "http" || scheme === "ws" ? 80 : scheme === "ftp" ? 21 : 443;
   // The host and port, after the credentials if there is an "@": a
