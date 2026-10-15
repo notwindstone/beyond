@@ -652,6 +652,32 @@ const SPECIAL = new Map<string, number>([
   ["wss", 443],
 ]);
 
+/**
+ * The special scheme `input[0..end]` is, in lower case, or null: a constant,
+ * so that the fast path makes no string for it.
+ */
+function specialScheme(input: string, end: number): string | null {
+  const a = input.charCodeAt(0) | 0x20;
+  const b = input.charCodeAt(1) | 0x20;
+  if (end === 4 && a === 0x68 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x74 && (input.charCodeAt(3) | 0x20) === 0x70) {
+    return "http";
+  }
+  if (
+    end === 5 && a === 0x68 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x74 && (input.charCodeAt(3) | 0x20) === 0x70 &&
+    (input.charCodeAt(4) | 0x20) === 0x73
+  ) {
+    return "https";
+  }
+  if (end === 2 && a === 0x77 && b === 0x73) return "ws";
+  if (end === 3 && a === 0x77 && b === 0x73 && (input.charCodeAt(2) | 0x20) === 0x73) return "wss";
+  if (end === 3 && a === 0x66 && b === 0x74 && (input.charCodeAt(2) | 0x20) === 0x70) return "ftp";
+  return null;
+}
+
+// The path of a record made by the fast path (which sets `pathText`, or a
+// path of its own): never changed, replaced by `segments`.
+const NO_PATH: string[] = [];
+
 /** A URL record. */
 class Record {
   scheme = "";
@@ -661,11 +687,29 @@ class Record {
   password = "";
   host: string | null = null;
   port: number | null = null;
-  path: string[] = [];
+  path: string[] = NO_PATH;
   // When not null, the URL has this opaque path instead of `path`.
   opaque: string | null = null;
   query: string | null = null;
   fragment: string | null = null;
+  // The serialization, when it is known: the input of a URL that serializes
+  // as it was written (see fastParse). Whatever changes the URL clears it.
+  serialized: string | null = null;
+  // A fast-parsed URL's path as it serializes ("/a/b"), until its segments
+  // are needed (`segments`): `path` is empty while this is not null.
+  pathText: string | null = null;
+
+  /** The path's segments (made from `pathText` first, if need be). */
+  segments(): string[] {
+    const t = this.pathText;
+    if (t !== null) {
+      this.path = t.slice(1).split("/");
+      this.pathText = null;
+    } else if (this.path === NO_PATH) {
+      this.path = [];
+    }
+    return this.path;
+  }
 
   special(): boolean {
     return this.isSpecial;
@@ -694,6 +738,7 @@ class Record {
     r.host = this.host;
     r.port = this.port;
     r.path = this.path.slice();
+    r.pathText = this.pathText;
     r.opaque = this.opaque;
     r.query = this.query;
     r.fragment = this.fragment;
@@ -707,6 +752,7 @@ class Record {
   }
 
   pathname(): string {
+    if (this.pathText !== null) return this.pathText;
     if (this.opaque !== null) return this.opaque;
     let out = "";
     for (const s of this.path) out += "/" + s;
@@ -714,6 +760,7 @@ class Record {
   }
 
   href(excludeFragment = false): string {
+    if (this.serialized !== null && !excludeFragment) return this.serialized;
     let out = this.scheme + ":";
     if (this.host !== null) {
       out += "//";
@@ -724,7 +771,7 @@ class Record {
       }
       out += this.host;
       if (this.port !== null) out += ":" + this.port;
-    } else if (this.opaque === null && this.path.length > 1 && this.path[0] === "") {
+    } else if (this.opaque === null && this.segments().length > 1 && this.path[0] === "") {
       out += "/.";
     }
     out += this.pathname();
@@ -819,34 +866,53 @@ function clean(input: string, trim: boolean): string {
 
 /**
  * The path, query and fragment of a fast-parsed URL from `input[start..]`
- * (which starts with "/", or is empty) into `url`: false if the general
- * parser is needed (a "." or ".." segment).
+ * (which starts with "/", or is empty) into `url`, as the path, query and
+ * fragment states would (nothing in them needs encoding): whether they
+ * serialize as they are written (no dot segments, and a path).
  */
 function fastPath(input: string, start: number, url: Record): boolean {
   const len = input.length;
   let end = start;
+  // (Whether a segment starts with "." or "%": it may be a dot segment.)
+  let dots = false;
   while (end < len) {
     const c = input.charCodeAt(end);
     if (c === 0x3f || c === 0x23) break;
+    if (c === 0x2f) {
+      const d = input.charCodeAt(end + 1);
+      if (d === 0x2e || d === 0x25) dots = true;
+    }
     end++;
   }
-  const path: string[] = [];
+  let same = true;
   if (start === end) {
-    path.push("");
+    url.pathText = "/";
+    same = false;
+  } else if (!dots) {
+    url.pathText = input.slice(start, end);
   } else {
+    const path: string[] = [];
     let seg = start + 1;
     for (let i = seg; i <= end; i++) {
       if (i === end || input.charCodeAt(i) === 0x2f) {
-        // (A dot segment: ".", "..")
-        if (input.charCodeAt(seg) === 0x2e && (i - seg === 1 || (i - seg === 2 && input.charCodeAt(seg + 1) === 0x2e))) {
-          return false;
+        // (A dot segment: ".", "..", or with "%2e" for a dot.)
+        const first = input.charCodeAt(seg);
+        if ((first === 0x2e || first === 0x25) && i - seg <= 6 && dotSegment(input, seg, i)) {
+          same = false;
+          if (i - seg === 1 || i - seg === 3) {
+            if (i === end) path.push("");
+          } else {
+            path.pop();
+            if (i === end) path.push("");
+          }
+        } else {
+          path.push(input.slice(seg, i));
         }
-        path.push(input.slice(seg, i));
         seg = i + 1;
       }
     }
+    url.path = path;
   }
-  url.path = path;
   if (end < len && input.charCodeAt(end) === 0x3f) {
     let q = end + 1;
     while (q < len && input.charCodeAt(q) !== 0x23) q++;
@@ -854,7 +920,13 @@ function fastPath(input: string, start: number, url: Record): boolean {
     end = q;
   }
   if (end < len) url.fragment = input.slice(end + 1);
-  return true;
+  return same;
+}
+
+/** Whether `input[seg..end]` is a single-dot (length 1 or 3) or double-dot path segment. */
+function dotSegment(input: string, seg: number, end: number): boolean {
+  const s = input.slice(seg, end);
+  return singleDot(s) || doubleDot(s);
 }
 
 /** Whether `s[start..end]` is an IPv4 address as it serializes: four decimal parts, 0 to 255, without leading zeros. */
@@ -880,21 +952,24 @@ function canonicalIPv4(s: string, start: number, end: number): boolean {
 
 /**
  * The common URL, parsed without the state machine: printable ASCII that
- * needs no encoding, a special scheme other than file with "//", a host
- * that is a plain domain (no credentials, IPv4 or IPv6), a port, and a
- * path without dot segments; or such a path (from "/") against such a
- * base. Null when the general parser is needed (not a failure).
+ * needs no encoding, a special scheme other than file with "//",
+ * credentials, a host that is a plain domain (no IPv6, an IPv4 address only
+ * as it serializes), a port, and a path, query and fragment; or such a path
+ * (from "/") against such a base. Null when the general parser is needed
+ * (not a failure). A URL that serializes as it is written keeps the input
+ * as its serialization.
  */
 function fastParse(input: string, base: Record | null): Record | null {
-  // (Not: controls and non-ASCII, space " % ' < > \\ ^ ` { | }, which need
-  // trimming, encoding, decoding or the reverse-solidus rules.)
+  // (Not: controls and non-ASCII, space " ' < > \\ ^ ` { | }, which need
+  // trimming, encoding or the reverse-solidus rules. A "%" is kept as it is
+  // but in the host.)
   const len = input.length;
   for (let i = 0; i < len; i++) {
     // (fastUnsafe, inline: this loop runs for every character.)
     const c = input.charCodeAt(i);
     if (
-      c <= 0x20 || c >= 0x7f || c === 0x22 || c === 0x25 || c === 0x27 || c === 0x3c || c === 0x3e ||
-      c === 0x5c || c === 0x5e || c === 0x60 || c === 0x7b || c === 0x7c || c === 0x7d
+      c <= 0x20 || c >= 0x7f || c === 0x22 || c === 0x27 || c === 0x3c || c === 0x3e || c === 0x5c ||
+      c === 0x5e || c === 0x60 || c === 0x7b || c === 0x7c || c === 0x7d
     ) {
       return null;
     }
@@ -910,36 +985,69 @@ function fastParse(input: string, base: Record | null): Record | null {
     url.password = base.password;
     url.host = base.host;
     url.port = base.port;
-    return fastPath(input, 0, url) ? url : null;
+    fastPath(input, 0, url);
+    return url;
   }
-  // The scheme.
+  // The scheme: a special one but file, with "//".
   let i = 0;
+  let same = true;
   while (i < len) {
     const c = input.charCodeAt(i);
     if (c === 0x3a) break;
-    if (!(isAlpha(c) || (i > 0 && (isDigit(c) || c === 0x2b || c === 0x2d || c === 0x2e)))) return null;
+    if (c >= 0x41 && c <= 0x5a) same = false;
     i++;
   }
-  if (i === 0 || i + 2 >= len || input.charCodeAt(i + 1) !== 0x2f || input.charCodeAt(i + 2) !== 0x2f) return null;
-  const scheme = input.slice(0, i).toLowerCase();
-  const defaultPort = SPECIAL.get(scheme);
-  if (defaultPort === undefined || scheme === "file") return null;
-  // The host and port.
-  const hostStart = i + 3;
+  if (i + 2 >= len || input.charCodeAt(i + 1) !== 0x2f || input.charCodeAt(i + 2) !== 0x2f) return null;
+  const scheme = specialScheme(input, i);
+  if (scheme === null) return null;
+  const defaultPort = scheme === "http" || scheme === "ws" ? 80 : scheme === "ftp" ? 21 : 443;
+  // The host and port, after the credentials if there is an "@": a
+  // username, and a password after a ":", neither with what they encode
+  // (; = @ [ ] and another ":").
+  const authStart = i + 3;
+  let hostStart = authStart;
   let hostEnd = hostStart;
   let portStart = -1;
   let upper = false;
+  let percent = false;
+  let encode = false;
+  // (The "@", and the ":" before it.)
+  let at = -1;
+  let colon = -1;
   while (hostEnd < len) {
     const c = input.charCodeAt(hostEnd);
     if (c === 0x2f || c === 0x3f || c === 0x23) break;
-    if (c === 0x40 || c === 0x5b || c === 0x5d) return null;
-    if (c === 0x3a) {
+    if (c === 0x40) {
+      if (at >= 0 || encode) return null;
+      at = hostEnd;
+      colon = portStart;
+      hostStart = hostEnd + 1;
+      portStart = -1;
+      upper = false;
+      percent = false;
+    } else if (c === 0x5b || c === 0x5d) {
+      return null;
+    } else if (c === 0x3a) {
       if (portStart >= 0) return null;
       portStart = hostEnd;
+    } else if (c === 0x25) {
+      percent = true;
+    } else if (c === 0x3b || c === 0x3d) {
+      encode = true;
     } else if (c >= 0x41 && c <= 0x5a && portStart < 0) {
       upper = true;
     }
     hostEnd++;
+  }
+  // (A "%" in the host is decoded.)
+  if (percent) return null;
+  let username = "";
+  let password = "";
+  if (at >= 0) {
+    username = input.slice(authStart, colon >= 0 ? colon : at);
+    if (colon >= 0) password = input.slice(colon + 1, at);
+    // (An empty password loses its ":", empty credentials their "@".)
+    if ((colon >= 0 && password === "") || (username === "" && password === "")) same = false;
   }
   const nameEnd = portStart >= 0 ? portStart : hostEnd;
   if (nameEnd === hostStart) return null;
@@ -950,24 +1058,37 @@ function fastParse(input: string, base: Record | null): Record | null {
   while (labelStart > hostStart && input.charCodeAt(labelStart - 1) !== 0x2e) labelStart--;
   if (isDigit(input.charCodeAt(labelStart)) && !canonicalIPv4(input, hostStart, nameEnd)) return null;
   let host = input.slice(hostStart, nameEnd);
-  if (upper) host = host.toLowerCase();
+  if (upper) {
+    host = host.toLowerCase();
+    same = false;
+  }
   let port: number | null = null;
-  if (portStart >= 0 && portStart + 1 < hostEnd) {
-    let n = 0;
-    for (let k = portStart + 1; k < hostEnd; k++) {
-      const c = input.charCodeAt(k);
-      if (!isDigit(c)) return null;
-      n = n * 10 + (c - 0x30);
-      if (n > 65535) return null;
+  if (portStart >= 0) {
+    // (Written as it serializes: not empty, not the default, without
+    // leading zeros.)
+    let written = false;
+    if (portStart + 1 < hostEnd) {
+      let n = 0;
+      for (let k = portStart + 1; k < hostEnd; k++) {
+        const c = input.charCodeAt(k);
+        if (!isDigit(c)) return null;
+        n = n * 10 + (c - 0x30);
+        if (n > 65535) return null;
+      }
+      port = n === defaultPort ? null : n;
+      written = port !== null && (input.charCodeAt(portStart + 1) !== 0x30 || hostEnd - portStart === 2);
     }
-    port = n === defaultPort ? null : n;
+    if (!written) same = false;
   }
   const url = new Record();
   url.scheme = scheme;
   url.isSpecial = true;
+  url.username = username;
+  url.password = password;
   url.host = host;
   url.port = port;
-  return fastPath(input, hostEnd, url) ? url : null;
+  if (fastPath(input, hostEnd, url) && same) url.serialized = input;
+  return url;
 }
 
 /**
@@ -979,9 +1100,16 @@ function parse(rawInput: string, base: Record | null, url: Record | null, overri
   if (url === null) {
     const fast = fastParse(rawInput, base);
     if (fast !== null) return fast;
+  } else {
+    url.serialized = null;
+    url.segments();
   }
+  if (base !== null) base.segments();
   const input = clean(rawInput, url === null);
-  if (url === null) url = new Record();
+  if (url === null) {
+    url = new Record();
+    url.path = [];
+  }
   let state = override !== 0 ? override : SCHEME_START;
   let buffer = "";
   let atSignSeen = false;
@@ -1433,6 +1561,7 @@ export class URLSearchParams {
     const url = this._url;
     if (url === null) return;
     const s = serializeForm(this._list);
+    url._url.serialized = null;
     url._url.query = s === "" ? null : s;
   }
 
@@ -1544,10 +1673,16 @@ function invalidURL(input: string): TypeError {
 function parseWithBase(url: string, base: string | URL | undefined): Record | null {
   let b: Record | null = null;
   if (base !== undefined) {
-    b = base instanceof URL ? base._url : parse(usv(base), null, null, 0);
-    if (b === null) return null;
+    if (base instanceof URL) {
+      b = base._url;
+    } else {
+      // (fastParse takes only ASCII, which usv leaves as it is.)
+      const s = String(base);
+      b = fastParse(s, null) ?? parse(usv(s), null, null, 0);
+      if (b === null) return null;
+    }
   }
-  return parse(usv(url), b, null, 0);
+  return fastParse(url, b) ?? parse(usv(url), b, null, 0);
 }
 
 export class URL {
@@ -1574,6 +1709,7 @@ export class URL {
   }
 
   _setQuery(query: string | null): void {
+    this._url.serialized = null;
     this._url.query = query;
     if (this._params !== null) this._params._list = query === null ? [] : parseForm(query);
   }
@@ -1593,7 +1729,7 @@ export class URL {
     const u = this._url;
     switch (u.scheme) {
       case "blob": {
-        if (u.opaque === null && u.path.length === 0) return "null";
+        if (u.opaque === null && u.segments().length === 0) return "null";
         const inner = parse(u.pathname(), null, null, 0);
         if (inner !== null && (inner.scheme === "http" || inner.scheme === "https")) {
           return inner.scheme + "://" + inner.host + (inner.port !== null ? ":" + inner.port : "");
@@ -1625,6 +1761,7 @@ export class URL {
 
   set username(value: string) {
     if (this._url.noCredentials()) return;
+    this._url.serialized = null;
     this._url.username = encodeString(usv(value), USERINFO, false);
   }
 
@@ -1634,6 +1771,7 @@ export class URL {
 
   set password(value: string) {
     if (this._url.noCredentials()) return;
+    this._url.serialized = null;
     this._url.password = encodeString(usv(value), USERINFO, false);
   }
 
@@ -1665,6 +1803,7 @@ export class URL {
     if (this._url.noCredentials()) return;
     const v = usv(value);
     if (v === "") {
+      this._url.serialized = null;
       this._url.port = null;
       return;
     }
@@ -1677,6 +1816,8 @@ export class URL {
 
   set pathname(value: string) {
     if (this._url.opaque !== null) return;
+    this._url.serialized = null;
+    this._url.pathText = null;
     this._url.path = [];
     parse(usv(value), null, this._url, PATH_START);
   }
@@ -1693,6 +1834,7 @@ export class URL {
       return;
     }
     if (v.charCodeAt(0) === 0x3f) v = v.slice(1);
+    this._url.serialized = null;
     this._url.query = "";
     parse(v, null, this._url, QUERY_STATE);
     if (this._params !== null) this._params._list = parseForm(v);
@@ -1716,10 +1858,12 @@ export class URL {
   set hash(value: string) {
     let v = usv(value);
     if (v === "") {
+      this._url.serialized = null;
       this._url.fragment = null;
       return;
     }
     if (v.charCodeAt(0) === 0x23) v = v.slice(1);
+    this._url.serialized = null;
     this._url.fragment = "";
     parse(v, null, this._url, FRAGMENT_STATE);
   }

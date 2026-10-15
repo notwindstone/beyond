@@ -16,3 +16,115 @@ file:///C:/y https://a.b:8 null
 http://example.com/%7e?%7e#%7e 127.0.0.1 [::1:0:0]
 http://xn--tda.example/%C3%A4?%C3%B6#%C3%BC
 TypeError ERR_INVALID_URL
+https://user:pass@sub.example.com:8080/p/a/t/h?query=string#hash https://user:pass@sub.example.com:8080/p/a/t/h?query=string#hash https: user pass sub.example.com:8080 8080 /p/a/t/h ?query=string #hash
+  https://user:pass@sub.example.com:99/p/a/t/h?query=string#z https://user:pass@sub.example.com:99/p/a/t/h?query=string#z
+http://user@h/ http://user@h/ http: user  h  /  
+  http://user@h:99/#z http://user@h:99/#z
+http://user:@h/ http://user@h/ http: user  h  /  
+  http://user@h:99/#z http://user@h:99/#z
+http://:pass@h/ http://:pass@h/ http:  pass h  /  
+  http://:pass@h:99/#z http://:pass@h:99/#z
+http://:@h/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://@h/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://u:p:q@h/ http://u:p%3Aq@h/ http: u p%3Aq h  /  
+  http://u:p%3Aq@h:99/#z http://u:p%3Aq@h:99/#z
+http://a@b@c/ http://a%40b@c/ http: a%40b  c  /  
+  http://a%40b@c:99/#z http://a%40b@c:99/#z
+http://u;x@h/ http://u%3Bx@h/ http: u%3Bx  h  /  
+  http://u%3Bx@h:99/#z http://u%3Bx@h:99/#z
+http://u=x@h/ http://u%3Dx@h/ http: u%3Dx  h  /  
+  http://u%3Dx@h:99/#z http://u%3Dx@h:99/#z
+http://u%41:p%zz@h/ http://u%41:p%zz@h/ http: u%41 p%zz h  /  
+  http://u%41:p%zz@h:99/#z http://u%41:p%zz@h:99/#z
+http://user@/ invalid
+http://u:p@h:81 http://u:p@h:81/ http: u p h:81 81 /  
+  http://u:p@h:99/#z http://u:p@h:99/#z
+http://h:/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h:0/ http://h:0/ http:   h:0 0 /  
+  http://h:99/#z http://h:99/#z
+http://h:080/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h:80/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+https://h:443 https://h/ https:   h  /  
+  https://h:99/#z https://h:99/#z
+http://h:65535/ http://h:65535/ http:   h:65535 65535 /  
+  http://h:99/#z http://h:99/#z
+http://h:65536/ invalid
+http://h:8a/ invalid
+http://h:1:2/ invalid
+http://h http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h?q http://h/?q http:   h  / ?q 
+  http://h:99/?q#z http://h:99/?q#z
+http://h#f http://h/#f http:   h  /  #f
+  http://h:99/#z http://h:99/#z
+http://h/? http://h/? http:   h  /  
+  http://h:99/?#z http://h:99/?#z
+http://h/# http://h/# http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h/a?b#c?d#e http://h/a?b#c?d#e http:   h  /a ?b #c?d#e
+  http://h:99/a?b#z http://h:99/a?b#z
+http://h/a/./b/../c http://h/a/c http:   h  /a/c  
+  http://h:99/a/c#z http://h:99/a/c#z
+http://h/a/.. http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h/a/. http://h/a/ http:   h  /a/  
+  http://h:99/a/#z http://h:99/a/#z
+http://h/.. http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+http://h/../../x http://h/x http:   h  /x  
+  http://h:99/x#z http://h:99/x#z
+http://h/%2e/x/%2E%2e/y http://h/y http:   h  /y  
+  http://h:99/y#z http://h:99/y#z
+http://h/.%2e/z http://h/z http:   h  /z  
+  http://h:99/z#z http://h:99/z#z
+http://h/%2e./z http://h/z http:   h  /z  
+  http://h:99/z#z http://h:99/z#z
+http://h/a/%2e http://h/a/ http:   h  /a/  
+  http://h:99/a/#z http://h:99/a/#z
+http://h/.a/..b/a. http://h/.a/..b/a. http:   h  /.a/..b/a.  
+  http://h:99/.a/..b/a.#z http://h:99/.a/..b/a.#z
+http://h/a//b/ http://h/a//b/ http:   h  /a//b/  
+  http://h:99/a//b/#z http://h:99/a//b/#z
+http://h/%7E%zz?%7e#% http://h/%7E%zz?%7e#% http:   h  /%7E%zz ?%7e #%
+  http://h:99/%7E%zz?%7e#z http://h:99/%7E%zz?%7e#z
+http://h%41/ http://ha/ http:   ha  /  
+  http://ha:99/#z http://ha:99/#z
+http://H.Example.COM/A http://h.example.com/A http:   h.example.com  /A  
+  http://h.example.com:99/A#z http://h.example.com:99/A#z
+HTTPS://h/ https://h/ https:   h  /  
+  https://h:99/#z https://h:99/#z
+hTtP://h/ http://h/ http:   h  /  
+  http://h:99/#z http://h:99/#z
+ws://h:80/ ws://h/ ws:   h  /  
+  ws://h:99/#z ws://h:99/#z
+wss://h:443/x wss://h/x wss:   h  /x  
+  wss://h:99/x#z wss://h:99/x#z
+ftp://h:21/ ftp://h/ ftp:   h  /  
+  ftp://h:99/#z ftp://h:99/#z
+http://1.2.3.4/ http://1.2.3.4/ http:   1.2.3.4  /  
+  http://1.2.3.4:99/#z http://1.2.3.4:99/#z
+http://1.2.3.04/ http://1.2.3.4/ http:   1.2.3.4  /  
+  http://1.2.3.4:99/#z http://1.2.3.4:99/#z
+http://01.2.3.4/ http://1.2.3.4/ http:   1.2.3.4  /  
+  http://1.2.3.4:99/#z http://1.2.3.4:99/#z
+http://1.2.3.256/ invalid
+http://1.2.3/ http://1.2.0.3/ http:   1.2.0.3  /  
+  http://1.2.0.3:99/#z http://1.2.0.3:99/#z
+http://h.1/ invalid
+http://h.example.1./ invalid
+http://a.b./c http://a.b./c http:   a.b.  /c  
+  http://a.b.:99/c#z http://a.b.:99/c#z
+http://[::1]/ http://[::1]/ http:   [::1]  /  
+  http://[::1]:99/#z http://[::1]:99/#z
+http://h/a b http://h/a%20b http:   h  /a%20b  
+  http://h:99/a%20b#z http://h:99/a%20b#z
+http://h/'x' http://h/'x' http:   h  /'x'  
+  http://h:99/'x'#z http://h:99/'x'#z
+http://h/?'x' http://h/?%27x%27 http:   h  / ?%27x%27 
+  http://h:99/?%27x%27#z http://h:99/?%27x%27#z
+http://u:p@h:81/b?c#d https://h/q http://x/y

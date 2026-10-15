@@ -105,7 +105,10 @@ networking code uses its extensions), zlib, brotli's decoder
   program reads them; most responses only send a content type.
 
 - `URL` and `URLSearchParams`: the URL standard's parser (a state machine,
-  with a fast path for the common URL), hosts with IPv4, IPv6 and
+  with a fast path for the common URL: a special scheme, credentials, a
+  domain or IPv4 host, a port, and a path, query and fragment that need no
+  encoding, dot segments and `%` escapes included; one that serializes as
+  it is written keeps its input as its `href`), hosts with IPv4, IPv6 and
   internationalized domains (punycode, and UTS #46's mapping approximated
   with NFKC, lower case and the Unicode categories), all the setters. It
   passes all of the web platform tests' URL data (urltestdata 896/896,
@@ -215,6 +218,16 @@ A fetch of a small response went from about 77,000 instructions to about
   typed array from an `ArrayBuffer`, which cost every request a
   `TypeError` with its stack: 14% of a fetch then. Header names are found
   in a hash table, and picohttpparser scans with SSE4.2.
+
+`new URL(s).href` (bench/url.ts) takes 0.37 µs for a plain URL
+(`http://127.0.0.1:3000/`; Bun: 0.10), 0.68 µs with credentials, a port,
+a query and a fragment (Bun: 0.19 to 0.27), 0.85 µs with dot segments (Bun:
+0.16 to 0.21): still about four times Bun's, from 1 to 9 µs before. Luminous
+now compiles the parser's character scans as integer compares (a scan of
+13 compares a character went from 15.6 ns to 2.8 ns a character), and the
+fast path covers credentials, dot segments and escapes, keeps a canonical
+input as the URL's serialization and its path as one string, and makes no
+string for the scheme.
 
 Streaming a large body is slower than Bun's for now: 256 MB in 64 KB chunks
 takes 1.25 s (Bun: 0.81 s).

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Beyond against Bun, runs alternated: the server (`oha -c 50` for 10 s, the
-# text and the JSON program) and the fetch() client (1, 10 and 50 in
-# flight, against a Beyond server). Needs bun and oha on PATH, and Beyond
-# built (cargo build --release).
+# text and the JSON program), the fetch() client (1, 10 and 50 in
+# flight, against a Beyond server) and URL parsing. Needs bun and oha on
+# PATH, and Beyond built (cargo build --release).
 #
-#   bench/run.sh [serve|fetch]...
+#   bench/run.sh [serve|fetch|url]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
 beyond=target/release/beyond
@@ -75,5 +75,13 @@ fetch() {
   stop
 }
 
-[ $# -eq 0 ] && set -- serve fetch
+url() {
+  prepare url
+  for round in 1 2; do
+    echo "url beyond"; "$work/url"
+    echo "url bun"; bun "$work/url.bun.ts"
+  done
+}
+
+[ $# -eq 0 ] && set -- serve fetch url
 for what in "$@"; do "$what"; done
