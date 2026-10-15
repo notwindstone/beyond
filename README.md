@@ -118,17 +118,35 @@ excerpt, and their stacks' lines are the bundle's.
 ## Performance
 
 `Beyond.serve` against `Bun.serve` (Bun 1.4.2), the same program
-(`Response("Hello World!")` and `Response.json({...})`), 10 seconds of
-`oha -c 50` on the same 4-core machine as the server:
+(`new Response("Hello World!")`, and `Response.json({...})` of a small
+object), 10 seconds of `oha -c 50` on the same 4-core machine as the
+server, runs alternated:
 
-| | requests/s | p99 latency | peak memory |
+| | requests/s | p99 latency | memory (RSS) |
 |---|---|---|---|
-| Beyond, text | 68,038 | 1.71 ms | 16.0 MB |
-| Bun, text | 68,210 | 1.90 ms | 27.2 MB |
-| Beyond, JSON | 65,326 | 1.73 ms | 16.4 MB |
-| Bun, JSON | 62,324 | 2.08 ms | 28.3 MB |
+| Beyond, text | 122,973 | 0.90 ms | 21 MB |
+| Bun, text | 111,861 | 1.18 ms | 25 MB |
+| Beyond, JSON | 115,680 | 0.97 ms | 22 MB |
+| Bun, JSON | 107,297 | 1.23 ms | 27 MB |
 
-Throughput is level with Bun's for text and ahead for JSON (the load
-generator shares the cores), in about 60% of the memory. Before the request path compiled to native code
-(with `#private` fields and regular expressions in `Headers`), Beyond
-answered 37,661 text and 25,350 JSON requests a second.
+Beyond answers about 10% more text and 8% more JSON requests a second than
+Bun, with lower tail latency, in about 80% of the memory (the load
+generator shares the cores). What got it there:
+
+- The request path is native code: `Headers`, `Request` and `Response`
+  keep their state in plain fields and check without regular expressions
+  (before that, Beyond answered 37,661 text and 25,350 JSON requests a
+  second).
+- A program's globals (`Response`, `Request`, `URL`, ...) are bindings of
+  Beyond's modules to Luminous (`--global`): `new Response(...)` is the
+  class's native constructor, not the engine constructing a global (+15%).
+- The server makes the request's URL in C, shares the strings of common
+  methods and header names, and a response with no headers of its own
+  sends only its content type.
+- Two engine fast paths in Luminous's patch: `instanceof` without calling
+  `Symbol.hasInstance` when it cannot have been replaced, and
+  `JSON.stringify` of plain data straight from object shapes (a small
+  object's went from about 8,800 instructions to a few hundred).
+
+Streaming a large body is slower than Bun's for now: 256 MB in 64 KB chunks
+takes 1.25 s (Bun: 0.81 s).
