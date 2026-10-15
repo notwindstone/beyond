@@ -54,7 +54,9 @@ function send(handle: number, res: unknown): void {
   const stream = res._stream;
   // (A stream `body` made of the stored body, unread: the stored body.)
   if (stream === null || (res._streamOfBody && !stream._disturbed && stream._reader === undefined)) {
-    respond(handle, res.status, res.statusText, res._flat(), res._body);
+    // (Most responses have no headers object: only a content type.)
+    if (res._headers === null) respond(handle, res.status, res.statusText, null, res._body, res._contentType ?? res._defaultType);
+    else respond(handle, res.status, res.statusText, res._flat(), res._body, null);
     return;
   }
   sendStream(handle, res, stream);
@@ -107,7 +109,7 @@ async function sendStream(handle: number, res: Response, stream: ReadableStream<
     return;
   }
   if (started) endStream(handle, true);
-  else respond(handle, res.status, res.statusText, res._flat(), null);
+  else respond(handle, res.status, res.statusText, res._flat(), null, null);
 }
 
 export function serve(options: ServeOptions): Server {
@@ -126,15 +128,8 @@ export function serve(options: ServeOptions): Server {
     }
     return internalError(e);
   };
-  const handler = (handle: number, method: string, path: string, flat: string[], body: ArrayBuffer | undefined) => {
-    let host = "localhost";
-    for (let i = 0; i < flat.length; i += 2) {
-      if (flat[i] === "host") {
-        host = flat[i + 1];
-        break;
-      }
-    }
-    const request = Request._fromServer(method, `http://${host}${path}`, flat, body);
+  const handler = (handle: number, method: string, url: string, flat: string[], body: ArrayBuffer | undefined) => {
+    const request = Request._fromServer(method, url, flat, body);
     let res: Response | Promise<Response>;
     try {
       res = options.fetch(request, server);

@@ -132,10 +132,26 @@ static Slot *slot_of(double h, uint32_t *index) {
     return &slots[i];
 }
 
+// Strings made once: the common methods and header names (a request's are
+// these, shared, most of the time).
+static const char *const common[] = {
+    "GET", "POST", "PUT", "DELETE", "HEAD", "PATCH", "OPTIONS",
+    "host", "user-agent", "accept", "accept-encoding", "accept-language", "connection", "content-type",
+    "content-length", "cookie", "referer", "origin", "cache-control", "pragma", "authorization",
+    "upgrade-insecure-requests", "if-none-match", "if-modified-since", "x-forwarded-for", "x-forwarded-proto",
+    "x-real-ip", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "sec-ch-ua",
+    "sec-ch-ua-mobile", "sec-ch-ua-platform", "dnt", "te", "transfer-encoding", "priority",
+};
+#define NCOMMON (sizeof common / sizeof *common)
+static JSValue common_values[NCOMMON];
+static uint8_t common_lens[NCOMMON];
+
 // The JavaScript values marked while the program runs (module.c's hook).
 void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
     for (int i = 0; i < nservers; i++)
         JS_MarkValue(rt, servers[i].handler, mark_func);
+    for (size_t i = 0; i < NCOMMON; i++)
+        JS_MarkValue(rt, common_values[i], mark_func);
     for (uint32_t i = 0; i < nslots; i++)
         if (slots[i].state != FREE)
             for (int k = 0; k < 4; k++)
@@ -144,23 +160,44 @@ void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
 
 // ---- Handing a request to JavaScript ----
 
+static JSValue common_string(JSContext *ctx, const char *p, size_t n) {
+    for (size_t i = 0; i < NCOMMON; i++) {
+        if (common_lens[i] == n && !memcmp(common[i], p, n)) {
+            if (JS_IsUndefined(common_values[i]))
+                common_values[i] = JS_NewStringLen(ctx, p, n);
+            return JS_DupValue(ctx, common_values[i]);
+        }
+    }
+    return JS_NewStringLen(ctx, p, n);
+}
+
+#define MAX_FIELDS 512
+
 typedef struct {
     JSContext *ctx;
-    JSValue array;
+    JSValue values[MAX_FIELDS];
     uint32_t n;
+    const char *host;
+    size_t host_len;
 } HeaderSink;
 
 // (Names in lower case: Bun's uWebSockets keeps them as sent.)
 static void add_header(void *user, const char *k, size_t kl, const char *v, size_t vl) {
     HeaderSink *h = user;
+    if (h->n + 2 > MAX_FIELDS)
+        return;
     char lower[256];
     if (kl <= sizeof lower) {
         for (size_t i = 0; i < kl; i++)
             lower[i] = (k[i] >= 'A' && k[i] <= 'Z') ? (char)(k[i] | 32) : k[i];
         k = lower;
     }
-    JS_SetPropertyUint32(h->ctx, h->array, h->n++, JS_NewStringLen(h->ctx, k, kl));
-    JS_SetPropertyUint32(h->ctx, h->array, h->n++, JS_NewStringLen(h->ctx, v, vl));
+    if (kl == 4 && !memcmp(k, "host", 4) && !h->host) {
+        h->host = v;
+        h->host_len = vl;
+    }
+    h->values[h->n++] = common_string(h->ctx, k, kl);
+    h->values[h->n++] = JS_NewStringLen(h->ctx, v, vl);
 }
 
 static void on_aborted(uws_res_t *res, void *data);
@@ -230,12 +267,29 @@ static void on_request(uws_res_t *res, uws_req_t *req, void *user) {
     s->server = user;
     const char *p;
     size_t n = beyond_req_method(req, &p);
-    s->args[0] = JS_NewStringLen(ctx, p, n);
-    n = uws_req_get_url(req, &p);
-    s->args[1] = JS_NewStringLen(ctx, p, n);
-    HeaderSink h = {ctx, JS_NewArray(ctx), 0};
+    s->args[0] = common_string(ctx, p, n);
+    HeaderSink h;
+    h.ctx = ctx;
+    h.n = 0;
+    h.host = NULL;
+    h.host_len = 0;
     beyond_req_headers(req, add_header, &h);
-    s->args[2] = h.array;
+    s->args[2] = JS_NewArrayFrom(ctx, (int)h.n, h.values);
+    // The URL: http://host/path (localhost without a Host header).
+    n = uws_req_get_url(req, &p);
+    if (!h.host) {
+        h.host = "localhost";
+        h.host_len = 9;
+    }
+    size_t ul = 7 + h.host_len + n;
+    char stack[1024];
+    char *u = ul <= sizeof stack ? stack : malloc(ul);
+    memcpy(u, "http://", 7);
+    memcpy(u + 7, h.host, h.host_len);
+    memcpy(u + 7 + h.host_len, p, n);
+    s->args[1] = JS_NewStringLen(ctx, u, ul);
+    if (u != stack)
+        free(u);
     // A body: read it all, then call the handler.
     const char *v;
     size_t cl = uws_req_get_header(req, "content-length", 14, &v);
@@ -290,7 +344,7 @@ typedef struct {
     JSContext *ctx;
     Slot *s;
     int status;
-    JSValueConst status_text, headers, body;
+    JSValueConst status_text, headers, body, content_type;
     bool ok;
 } Reply;
 
@@ -304,11 +358,15 @@ static void write_head(Reply *r, bool stream) {
     size_t text_len = 0;
     if (JS_IsString(r->status_text))
         text = JS_ToCStringLen(ctx, &text_len, r->status_text);
-    int n = snprintf(line, sizeof line, "%d %.*s", r->status, (int)(text && text_len ? text_len : strlen(reason(r->status))),
-                     text && text_len ? text : reason(r->status));
+    if (r->status == 200 && !text_len) {
+        uws_res_write_status(0, res, "200 OK", 6);
+    } else {
+        int n = snprintf(line, sizeof line, "%d %.*s", r->status,
+                         (int)(text && text_len ? text_len : strlen(reason(r->status))), text && text_len ? text : reason(r->status));
+        uws_res_write_status(0, res, line, (size_t)(n < (int)sizeof line ? n : (int)sizeof line - 1));
+    }
     if (text)
         JS_FreeCString(ctx, text);
-    uws_res_write_status(0, res, line, (size_t)(n < (int)sizeof line ? n : (int)sizeof line - 1));
     // headers: [name, value, ...]
     int64_t len = 0;
     if (JS_IsArray(r->headers))
@@ -326,6 +384,14 @@ static void write_head(Reply *r, bool stream) {
         JS_FreeCString(ctx, vs);
         JS_FreeValue(ctx, kv);
         JS_FreeValue(ctx, vv);
+    }
+    // (The content type a response has without headers of its own.)
+    if (JS_IsString(r->content_type)) {
+        size_t vl;
+        const char *vs = JS_ToCStringLen(ctx, &vl, r->content_type);
+        if (vs)
+            uws_res_write_header(0, res, "content-type", 12, vs, vl);
+        JS_FreeCString(ctx, vs);
     }
 }
 
@@ -378,8 +444,9 @@ static void write_reply(void *data) {
     r->ok = true;
 }
 
-// respond(handle, status, statusText, headers, body): false when the
-// request is no longer waiting (answered, aborted).
+// respond(handle, status, statusText, headers, body, contentType): false
+// when the request is no longer waiting (answered, aborted). `headers` is
+// [name, value, ...] or null, `contentType` a string or null.
 static JSValue js_respond(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     double h;
     int32_t status;
@@ -393,7 +460,7 @@ static JSValue js_respond(JSContext *ctx, JSValueConst this_val, int argc, JSVal
         slot_free(i);
         return JS_FALSE;
     }
-    Reply r = {ctx, s, status, argv[2], argv[3], argv[4], false};
+    Reply r = {ctx, s, status, argv[2], argv[3], argv[4], argc > 5 ? argv[5] : JS_UNDEFINED, false};
     if (s->state == SYNC)
         write_reply(&r);
     else
@@ -422,7 +489,7 @@ static JSValue js_respond_start(JSContext *ctx, JSValueConst this_val, int argc,
         slot_free(i);
         return JS_FALSE;
     }
-    Reply r = {ctx, s, status, argv[2], argv[3], JS_UNDEFINED, false};
+    Reply r = {ctx, s, status, argv[2], argv[3], JS_UNDEFINED, JS_UNDEFINED, false};
     if (s->state == SYNC)
         write_head(&r, true);
     else
@@ -550,6 +617,12 @@ static void on_listen(struct us_listen_socket_t *ls, void *user) {
 // listen(hostname, port, handler): the server's index, or -1.
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t port;
+    if (!common_lens[0]) {
+        for (size_t i = 0; i < NCOMMON; i++) {
+            common_lens[i] = (uint8_t)strlen(common[i]);
+            common_values[i] = JS_UNDEFINED;
+        }
+    }
     if (JS_ToInt32(ctx, &port, argv[1]))
         return JS_EXCEPTION;
     if (nservers == MAX_SERVERS)
@@ -598,7 +671,7 @@ const JSCFunctionListEntry beyond_server_functions[] = {
     JS_CFUNC_DEF("listen", 3, js_listen),
     JS_CFUNC_DEF("serverPort", 1, js_server_port),
     JS_CFUNC_DEF("stopServer", 1, js_stop),
-    JS_CFUNC_DEF("respond", 5, js_respond),
+    JS_CFUNC_DEF("respond", 6, js_respond),
     JS_CFUNC_DEF("respondStart", 4, js_respond_start),
     JS_CFUNC_DEF("writeChunk", 2, js_write_chunk),
     JS_CFUNC_DEF("whenWritable", 2, js_when_writable),

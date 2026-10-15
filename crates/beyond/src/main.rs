@@ -43,6 +43,38 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// lib/globals.ts's globals: each module of lib/ and those it exports.
+const GLOBALS: &[(&str, &[&str])] = &[
+    ("console", &["console"]),
+    ("timers", &["setTimeout", "setInterval", "clearTimeout", "clearInterval"]),
+    ("encoding", &["TextEncoder", "TextDecoder", "TextEncoderStream", "TextDecoderStream"]),
+    ("events", &["Event", "CustomEvent", "EventTarget", "AbortController", "AbortSignal", "reportError"]),
+    ("crypto", &["Crypto", "crypto"]),
+    ("clone", &["structuredClone"]),
+    ("url", &["URL", "URLSearchParams"]),
+    ("blob", &["Blob", "File"]),
+    ("formdata", &["FormData"]),
+    ("fetch", &["Headers", "Request", "Response"]),
+    (
+        "streams",
+        &[
+            "ReadableStream",
+            "ReadableStreamDefaultReader",
+            "ReadableStreamDefaultController",
+            "ReadableStreamBYOBReader",
+            "ReadableStreamBYOBRequest",
+            "ReadableByteStreamController",
+            "WritableStream",
+            "WritableStreamDefaultWriter",
+            "WritableStreamDefaultController",
+            "TransformStream",
+            "TransformStreamDefaultController",
+            "ByteLengthQueuingStrategy",
+            "CountQueuingStrategy",
+        ],
+    ),
+];
+
 /// What Beyond adds to a program.
 fn embed(opts: &mut BuildOpts) -> Result<()> {
     let lib = root().join("lib");
@@ -60,6 +92,14 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
     e.init_fn = Some("beyond_init".into());
     e.loop_fn = Some("beyond_loop".into());
     e.link.push(rt.display().to_string());
+    // The globals the prelude defines from lib/'s modules: the program's
+    // references to them are those modules' bindings (`new Response()` a
+    // native constructor call).
+    for (spec, names) in GLOBALS {
+        for name in *names {
+            e.globals.push((name.to_string(), format!("beyond:{spec}")));
+        }
+    }
     // (What the Rust standard library, uWebSockets and zlib need.)
     for l in ["-lstdc++", "-lz", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
         e.link.push(l.into());
