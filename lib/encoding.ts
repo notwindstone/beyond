@@ -5,6 +5,7 @@
 
 import { decodeUtf8, encodeUtf8, encodeUtf8Into } from "beyond:native";
 import { describe, Formatter } from "./inspect.ts";
+import { describeAs, ReadableStream, TransformStream, WritableStream } from "./streams.ts";
 
 export interface TextEncoderEncodeIntoResult {
   read: number;
@@ -280,3 +281,113 @@ function decode16(b: Uint8Array, start: number, end: number, be: boolean, fatal:
   }
   return fromCodes(codes);
 }
+
+// ---- TextEncoderStream and TextDecoderStream ----
+
+/** A TransformStream of strings to their UTF-8. */
+export class TextEncoderStream {
+  _transform: TransformStream<string, Uint8Array>;
+  // (A lead surrogate at the end of a chunk, waiting for its trail.)
+  _lead = "";
+
+  constructor() {
+    this._transform = new TransformStream<string, Uint8Array>({
+      transform: (chunk, controller) => {
+        let s = this._lead + String(chunk);
+        this._lead = "";
+        const last = s.charCodeAt(s.length - 1);
+        if (last >= 0xd800 && last <= 0xdbff) {
+          this._lead = s.slice(-1);
+          s = s.slice(0, -1);
+        }
+        if (s !== "") controller.enqueue(encodeUtf8(s));
+      },
+      flush: (controller) => {
+        if (this._lead !== "") controller.enqueue(new Uint8Array([0xef, 0xbf, 0xbd]));
+      },
+    });
+  }
+
+  get encoding(): string {
+    return "utf-8";
+  }
+
+  get readable(): ReadableStream<Uint8Array> {
+    return this._transform.readable;
+  }
+
+  get writable(): WritableStream<string> {
+    return this._transform.writable;
+  }
+
+  get [Symbol.toStringTag](): string {
+    return "TextEncoderStream";
+  }
+}
+
+/** A TransformStream of bytes to the text they encode. */
+export class TextDecoderStream {
+  _decoder: TextDecoder;
+  _transform: TransformStream<BufferSource, string>;
+
+  constructor(label: string = "utf-8", options?: TextDecoderOptions) {
+    const decoder = new TextDecoder(label, options);
+    this._decoder = decoder;
+    this._transform = new TransformStream<BufferSource, string>({
+      transform: (chunk, controller) => {
+        if (!(chunk instanceof ArrayBuffer) && !ArrayBuffer.isView(chunk)) {
+          throw new TypeError("TextDecoderStream's chunks must be ArrayBuffers or ArrayBufferViews");
+        }
+        const s = decoder.decode(chunk, { stream: true });
+        if (s !== "") controller.enqueue(s);
+      },
+      flush: (controller) => {
+        const s = decoder.decode();
+        if (s !== "") controller.enqueue(s);
+      },
+    });
+  }
+
+  get encoding(): string {
+    return this._decoder.encoding;
+  }
+
+  get fatal(): boolean {
+    return this._decoder.fatal;
+  }
+
+  get ignoreBOM(): boolean {
+    return this._decoder.ignoreBOM;
+  }
+
+  get readable(): ReadableStream<string> {
+    return this._transform.readable;
+  }
+
+  get writable(): WritableStream<BufferSource> {
+    return this._transform.writable;
+  }
+
+  get [Symbol.toStringTag](): string {
+    return "TextDecoderStream";
+  }
+}
+
+describeAs(TextEncoderStream, (s: TextEncoderStream) => [
+  "TextEncoderStream",
+  [
+    ["encoding", "utf-8"],
+    ["readable", s.readable],
+    ["writable", s.writable],
+  ],
+]);
+describeAs(TextDecoderStream, (s: TextDecoderStream) => [
+  "TextDecoderStream",
+  [
+    ["encoding", s.encoding],
+    ["fatal", s.fatal],
+    ["ignoreBOM", s.ignoreBOM],
+    ["readable", s.readable],
+    ["writable", s.writable],
+  ],
+]);

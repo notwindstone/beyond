@@ -1,7 +1,8 @@
 // Headers, Request and Response (the Fetch standard), as Bun's behave
 // (Bun's are in src/runtime/webcore: Request.rs, Response.rs, Body.rs, and
-// WebKit's FetchHeaders). Bodies are strings or bytes for now (no streams,
-// Blob or FormData yet).
+// WebKit's FetchHeaders). A body is kept as it was given while it can be (a
+// string or bytes) and becomes a stream only when `body` is read; a body
+// made of a stream is read from it.
 //
 // Internal state is in `_` fields rather than private (`#`) ones, and the
 // checks avoid regular expressions: so that Luminous compiles these
@@ -12,10 +13,20 @@ import { decodeUtf8, encodeUtf8 } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
+import { readableStreamCancel, readAllBytes, ReadableStream, streamOfBytes } from "./streams.ts";
 import { URLSearchParams } from "./url.ts";
 
 export type HeadersInit = Headers | [string, string][] | Record<string, string>;
-export type BodyInit = string | ArrayBuffer | ArrayBufferView | Blob | FormData | URLSearchParams | null;
+export type BodyInit =
+  | string
+  | ArrayBuffer
+  | ArrayBufferView
+  | Blob
+  | FormData
+  | URLSearchParams
+  | ReadableStream<any>
+  | AsyncIterable<any>
+  | null;
 
 /** Whether the character code `c` may be in an HTTP token (a header name). */
 function tokenChar(c: number): boolean {
@@ -201,8 +212,10 @@ export class Headers {
 /** A body as stored: a string, the bytes, or none. */
 type Stored = string | ArrayBuffer | null;
 
-// The content type the last body `store` took has, if any (set by `store`).
+// The content type the last body `store` took has, if any, and the stream
+// it is (set by `store`).
 let extractedType: string | null = null;
+let extractedStream: ReadableStream<any> | null = null;
 
 /** The bytes of a Uint8Array, as an ArrayBuffer (the same one if it is whole). */
 function bufferOf(b: Uint8Array): ArrayBuffer {
@@ -215,6 +228,7 @@ function bufferOf(b: Uint8Array): ArrayBuffer {
  */
 function store(body: BodyInit | undefined): Stored {
   extractedType = null;
+  extractedStream = null;
   if (body === undefined || body === null) return null;
   if (typeof body === "string") return body;
   if (body instanceof ArrayBuffer) return body;
@@ -234,13 +248,38 @@ function store(body: BodyInit | undefined): Stored {
     extractedType = "application/x-www-form-urlencoded;charset=UTF-8";
     return body.toString();
   }
-  throw new TypeError("Unsupported body type (streams are not supported yet)");
+  if (body instanceof ReadableStream) {
+    if (body._disturbed || body._reader !== undefined) throw new TypeError("Body object should not be disturbed or locked");
+    extractedStream = body;
+    return null;
+  }
+  // (As Bun: an async generator function, or an async iterable, is read
+  // as a stream.)
+  let b: any = body;
+  if (typeof b === "function" && Object.prototype.toString.call(b) === "[object AsyncGeneratorFunction]") b = b();
+  if (typeof b === "object" && b !== null && typeof b[Symbol.asyncIterator] === "function") {
+    extractedStream = ReadableStream.from(b);
+    return null;
+  }
+  return String(body);
 }
 
 /** A stored body's size in bytes. */
 function bodySize(b: Stored): number {
   if (b === null) return 0;
   return typeof b === "string" ? encodeUtf8(b).length : b.byteLength;
+}
+
+/** A stored body's bytes. */
+function storedBytes(b: Stored): Uint8Array {
+  if (b === null) return new Uint8Array(0);
+  return typeof b === "string" ? encodeUtf8(b) : new Uint8Array(b);
+}
+
+function bodyUsedError(): TypeError {
+  const e = new TypeError("Body already used");
+  (e as any).code = "ERR_BODY_ALREADY_USED";
+  return e;
 }
 
 /** How Bun names a body's size: "(N bytes)", or "(0 KB)" when empty. */
@@ -251,26 +290,55 @@ function sizeLabel(n: number): string {
 /** What `fetch`'s bodies have in common (Body mixin). */
 class Body {
   _body: Stored;
+  // A body that is a stream, or the stream `body` made of the stored body
+  // (`_streamOfBody`: its bytes are still those of `_body` until read).
+  _stream: ReadableStream<any> | null = null;
+  _streamOfBody = false;
   _used = false;
 
   constructor(body: Stored) {
     this._body = body;
   }
 
-  get bodyUsed(): boolean {
-    return this._used;
+  get body(): ReadableStream<Uint8Array> | null {
+    let s = this._stream;
+    if (s === null) {
+      if (this._body === null && !this._used) return null;
+      s = streamOfBytes(this._used ? new Uint8Array(0) : storedBytes(this._body));
+      if (this._used) s._disturbed = true;
+      this._stream = s;
+      this._streamOfBody = true;
+    }
+    return s;
   }
 
-  _take(): Stored {
-    if (this._used) throw new TypeError("Body already used");
+  get bodyUsed(): boolean {
+    if (this._used) return true;
+    const s = this._stream;
+    // (As Bun's: a locked stream is used.)
+    return s !== null && (s._disturbed || s._reader !== undefined);
+  }
+
+  /** The whole body: as stored, or a promise of a stream's bytes. */
+  _consume(): Stored | Promise<Uint8Array> {
+    if (this.bodyUsed) throw bodyUsedError();
     this._used = true;
-    return this._body;
+    const s = this._stream;
+    if (s === null) return this._body;
+    if (this._streamOfBody) {
+      // (Not read: the stored body, the stream done with.)
+      readableStreamCancel(s, undefined);
+      return this._body;
+    }
+    return readAllBytes(s);
   }
 
   async text(): Promise<string> {
-    const b = this._take();
+    const c = this._consume();
+    const b = c instanceof Promise ? await c : c;
     if (b === null) return "";
-    return typeof b === "string" ? b : decodeUtf8(b);
+    if (typeof b === "string") return b;
+    return decodeUtf8(b, false);
   }
 
   async json(): Promise<any> {
@@ -278,13 +346,17 @@ class Body {
   }
 
   async arrayBuffer(): Promise<ArrayBuffer> {
-    const b = this._take();
-    if (b === null) return new ArrayBuffer(0);
-    return typeof b === "string" ? (encodeUtf8(b).buffer as ArrayBuffer) : b.slice(0);
+    const c = this._consume();
+    if (c instanceof Promise) return bufferOf(await c);
+    if (c === null) return new ArrayBuffer(0);
+    return typeof c === "string" ? (encodeUtf8(c).buffer as ArrayBuffer) : c.slice(0);
   }
 
   async bytes(): Promise<Uint8Array> {
-    return new Uint8Array(await this.arrayBuffer());
+    const c = this._consume();
+    if (c instanceof Promise) return await c;
+    if (c === null) return new Uint8Array(0);
+    return typeof c === "string" ? encodeUtf8(c) : new Uint8Array(c.slice(0));
   }
 
   /** The body's content type (overridden: Request's and Response's headers). */
@@ -294,12 +366,24 @@ class Body {
 
   async blob(): Promise<Blob> {
     const type = this._mime() ?? "";
-    return Blob._of(new Uint8Array(await this.arrayBuffer()), type.toLowerCase());
+    return Blob._of(await this.bytes(), type.toLowerCase());
   }
 
   async formData(): Promise<FormData> {
     const type = this._mime();
-    return parseForm(new Uint8Array(await this.arrayBuffer()), type);
+    return parseForm(await this.bytes(), type);
+  }
+
+  /** Gives `to` a copy of this body (a stream body is teed). */
+  _cloneBodyTo(to: Body): void {
+    if (this.bodyUsed) throw bodyUsedError();
+    to._body = this._body;
+    const s = this._stream;
+    if (s !== null && !this._streamOfBody) {
+      const [a, b] = s.tee();
+      this._stream = a;
+      to._stream = b;
+    }
   }
 }
 
@@ -325,6 +409,7 @@ export class Response extends Body {
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     super(store(body));
+    this._stream = extractedStream;
     let status = 200;
     let statusText = "";
     let headers: HeadersInit | undefined = undefined;
@@ -396,8 +481,11 @@ export class Response extends Body {
   }
 
   clone(): Response {
-    if (this.bodyUsed) throw new TypeError("Body already used");
-    return new Response(this._body, { status: this.status, statusText: this.statusText, headers: this.headers });
+    if (this.bodyUsed) throw bodyUsedError();
+    const r = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers });
+    this._cloneBodyTo(r);
+    r._defaultType = this._defaultType;
+    return r;
   }
 
   static json(data: any, init?: ResponseInit): Response {
@@ -461,11 +549,19 @@ function normalizeMethod(method: string): string {
   return m;
 }
 
-/** The body of `new Request(input, init)`. */
+/** The body of `new Request(input, init)` (a stream in `extractedStream`). */
 function requestBody(input: string | Request, init: RequestInit | undefined): Stored {
   if (init !== undefined && init.body !== undefined) return store(init.body);
   extractedType = null;
-  return input instanceof Request ? input._body : null;
+  extractedStream = null;
+  if (!(input instanceof Request)) return null;
+  if (input.bodyUsed) throw bodyUsedError();
+  // (A stream body moves to the new request.)
+  if (input._stream !== null && !input._streamOfBody) {
+    extractedStream = input._stream;
+    input._used = true;
+  }
+  return input._body;
 }
 
 export class Request extends Body {
@@ -477,6 +573,7 @@ export class Request extends Body {
 
   constructor(input: string | Request, init?: RequestInit) {
     super(requestBody(input, init));
+    this._stream = extractedStream;
     const from = input instanceof Request ? input : null;
     this.url = from !== null ? from.url : String(input);
     let method = from !== null ? from.method : "GET";
@@ -489,7 +586,7 @@ export class Request extends Body {
       if (this._headers === null) this._headers = new Headers();
       if (!this._headers.has("content-type")) this._headers.append("content-type", type);
     }
-    if ((method === "GET" || method === "HEAD") && this._body !== null) {
+    if ((method === "GET" || method === "HEAD") && (this._body !== null || this._stream !== null)) {
       throw new TypeError("Request with GET/HEAD method cannot have body.");
     }
   }
@@ -518,10 +615,10 @@ export class Request extends Body {
   }
 
   clone(): Request {
-    if (this.bodyUsed) throw new TypeError("Body already used");
+    if (this.bodyUsed) throw bodyUsedError();
     const r = new Request(this.url, { headers: this.headers });
     (r as any).method = this.method;
-    r._body = this._body;
+    this._cloneBodyTo(r);
     return r;
   }
 

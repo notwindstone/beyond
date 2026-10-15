@@ -2,6 +2,7 @@
 
 import { decodeUtf8, encodeUtf8 } from "beyond:native";
 import { describe, Formatter } from "./inspect.ts";
+import { ReadableStream, setBlobMaker, streamOfBytes } from "./streams.ts";
 
 export type BlobPart = string | ArrayBuffer | ArrayBufferView | Blob;
 
@@ -107,6 +108,10 @@ export class Blob {
     return JSON.parse(decodeUtf8(this._bytes, false));
   }
 
+  stream(): ReadableStream<Uint8Array> {
+    return streamOfBytes(this._bytes.slice());
+  }
+
   get [Symbol.toStringTag](): string {
     return "Blob";
   }
@@ -159,3 +164,6 @@ export class File extends Blob {
     f.record(`File (${this.size === 0 ? "0 KB" : `${this.size} bytes`})`, entries, { lastComma: false });
   }
 }
+
+// (ReadableStream's `blob()`, Bun's.)
+setBlobMaker((b) => Blob._of(b, ""));

@@ -230,7 +230,15 @@ static JSValue js_promise_state(JSContext *c, JSValueConst this_val, int argc, J
     return JS_NewInt32(c, (int)JS_PromiseState(c, argv[0]));
 }
 
+// promiseResult(promise): its value or reason (undefined while pending).
+static JSValue js_promise_result(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (!JS_IsPromise(argv[0]))
+        return JS_UNDEFINED;
+    return JS_PromiseResult(c, argv[0]);
+}
+
 const JSCFunctionListEntry beyond_web_functions[] = {
+    JS_CFUNC_DEF("promiseResult", 1, js_promise_result),
     JS_CFUNC_DEF("writeOut", 2, js_write_out),
     JS_CFUNC_DEF("promiseState", 1, js_promise_state),
     JS_CFUNC_DEF("encodeUtf8", 1, js_encode_utf8),

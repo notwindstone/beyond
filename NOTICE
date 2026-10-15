@@ -12,7 +12,9 @@ Bun (https://github.com/oven-sh/bun)
 
 web-platform-tests (https://github.com/web-platform-tests/wpt)
   Copyright (c) web-platform-tests contributors. 3-Clause BSD License.
-  The URL test data in crates/beyond/tests/wpt (url/resources).
+  The URL test data in crates/beyond/tests/wpt (url/resources), and the
+  tests of streams and encoding streams (streams, encoding/streams; the
+  license is crates/beyond/tests/wpt/LICENSE.md).
 
 uSockets and uWebSockets, as forked by Bun
   (https://github.com/uNetworking/uSockets, https://github.com/uNetworking/uWebSockets)

@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "libusockets.h"
 #include "quickjs.h"
@@ -31,6 +32,10 @@ void uws_res_on_aborted(int ssl, uws_res_t *res, void (*handler)(uws_res_t *, vo
 void uws_res_on_data(int ssl, uws_res_t *res, void (*handler)(uws_res_t *, const char *, size_t, bool, void *),
                      void *data);
 void uws_res_cork(int ssl, uws_res_t *res, void *ctx, void (*corker)(void *ctx));
+bool uws_res_write(int ssl, uws_res_t *res, const char *data, size_t *length);
+void uws_res_end_stream(int ssl, uws_res_t *res, bool close_connection);
+void uws_res_on_writable(int ssl, uws_res_t *res, bool (*handler)(uws_res_t *, uint64_t, void *), void *data);
+void uws_res_clear_on_writable(int ssl, uws_res_t *res);
 size_t beyond_req_method(uws_req_t *req, const char **dest);
 void beyond_req_headers(uws_req_t *req, void (*cb)(void *, const char *, size_t, const char *, size_t), void *user);
 int us_listen_socket_port(struct us_listen_socket_t *ls);
@@ -55,7 +60,9 @@ static int nservers;
 // ---- Requests: slots, named by index and generation (a stale handle is
 // ignored, not dereferenced) ----
 
-enum { FREE, SYNC, BODY, ASYNC };
+// SYNC: in the handler; BODY: reading the request's body; ASYNC: waiting
+// for `respond`; STREAM: the response's head sent, its body being written.
+enum { FREE, SYNC, BODY, ASYNC, STREAM };
 
 typedef struct {
     uws_res_t *res;
@@ -63,7 +70,8 @@ typedef struct {
     uint32_t gen;
     uint8_t state;
     bool aborted;
-    JSValue args[4]; // method, url, headers, while the body arrives
+    JSValue args[4]; // method, url, headers, while the body arrives; then a
+                     // streamed response's writable callback
     char *body;
     size_t body_len, body_cap;
     uint32_t next_free;
@@ -184,11 +192,17 @@ static void dispatch(uint32_t i) {
     }
 }
 
+static void call_writable(uint32_t i, bool ok);
+
 static void on_aborted(uws_res_t *res, void *data) {
     (void)res;
     uint32_t i = (uint32_t)(uintptr_t)data;
-    if (i < nslots && slots[i].state != FREE)
+    if (i < nslots && slots[i].state != FREE) {
         slots[i].aborted = true;
+        // (A streamed response waiting to write learns it now.)
+        if (slots[i].state == STREAM)
+            call_writable(i, false);
+    }
 }
 
 static void on_body(uws_res_t *res, const char *chunk, size_t len, bool last, void *data) {
@@ -280,8 +294,9 @@ typedef struct {
     bool ok;
 } Reply;
 
-static void write_reply(void *data) {
-    Reply *r = data;
+// The status line and headers (`stream`: without the framing headers, for a
+// chunked body).
+static void write_head(Reply *r, bool stream) {
     JSContext *ctx = r->ctx;
     uws_res_t *res = r->s->res;
     char line[160];
@@ -302,13 +317,47 @@ static void write_reply(void *data) {
         JSValue kv = JS_GetPropertyInt64(ctx, r->headers, k), vv = JS_GetPropertyInt64(ctx, r->headers, k + 1);
         size_t kl, vl;
         const char *ks = JS_ToCStringLen(ctx, &kl, kv), *vs = JS_ToCStringLen(ctx, &vl, vv);
-        if (ks && vs)
+        bool framing = stream && ks &&
+                       ((kl == 14 && !strncasecmp(ks, "content-length", 14)) ||
+                        (kl == 17 && !strncasecmp(ks, "transfer-encoding", 17)));
+        if (ks && vs && !framing)
             uws_res_write_header(0, res, ks, kl, vs, vl);
         JS_FreeCString(ctx, ks);
         JS_FreeCString(ctx, vs);
         JS_FreeValue(ctx, kv);
         JS_FreeValue(ctx, vv);
     }
+}
+
+/** The bytes of a string's UTF-8 (`*owned`: to free), an ArrayBuffer or a view of one. */
+static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, const char **owned) {
+    *owned = NULL;
+    if (JS_IsString(v)) {
+        *owned = JS_ToCStringLen(ctx, len, v);
+        return (const uint8_t *)*owned;
+    }
+    size_t off = 0, bpe;
+    uint8_t *b = JS_GetArrayBuffer(ctx, len, v);
+    if (b)
+        return b;
+    JS_FreeValue(ctx, JS_GetException(ctx));
+    JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, len, &bpe);
+    if (JS_IsException(ab)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        *len = 0;
+        return NULL;
+    }
+    size_t total;
+    b = JS_GetArrayBuffer(ctx, &total, ab);
+    JS_FreeValue(ctx, ab);
+    return b ? b + off : NULL;
+}
+
+static void write_reply(void *data) {
+    Reply *r = data;
+    JSContext *ctx = r->ctx;
+    uws_res_t *res = r->s->res;
+    write_head(r, false);
     // body: a string (UTF-8), bytes (an ArrayBuffer or a view of one), or none
     if (JS_IsString(r->body)) {
         size_t bl;
@@ -321,21 +370,9 @@ static void write_reply(void *data) {
         else
             uws_res_end(0, res, "", 0, false);
     } else {
-        size_t bl = 0, off = 0, bpe;
-        uint8_t *b = JS_GetArrayBuffer(ctx, &bl, r->body);
-        if (!b) {
-            JS_FreeValue(ctx, JS_GetException(ctx));
-            JSValue ab = JS_GetTypedArrayBuffer(ctx, r->body, &off, &bl, &bpe);
-            if (JS_IsException(ab)) {
-                JS_FreeValue(ctx, JS_GetException(ctx));
-            } else {
-                size_t total;
-                b = JS_GetArrayBuffer(ctx, &total, ab);
-                if (b)
-                    b += off;
-                JS_FreeValue(ctx, ab);
-            }
-        }
+        size_t bl = 0;
+        const char *owned;
+        const uint8_t *b = bytes_of(ctx, r->body, &bl, &owned);
         uws_res_end(0, res, b ? (const char *)b : "", b ? bl : 0, false);
     }
     r->ok = true;
@@ -362,6 +399,145 @@ static JSValue js_respond(JSContext *ctx, JSValueConst this_val, int argc, JSVal
     else
         uws_res_cork(0, s->res, &r, write_reply);
     slot_free(i);
+    return JS_TRUE;
+}
+
+// ---- Streamed responses (chunked, Bun's HTTPServerWritable reduced) ----
+
+static void write_head_cb(void *data) { write_head(data, true); }
+
+// respondStart(handle, status, statusText, headers): sends the head of a
+// response whose body follows in chunks; false when the request is no
+// longer waiting.
+static JSValue js_respond_start(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    int32_t status;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]) || JS_ToInt32(ctx, &status, argv[1]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || s->state == BODY || s->state == STREAM)
+        return JS_FALSE;
+    if (s->aborted) {
+        slot_free(i);
+        return JS_FALSE;
+    }
+    Reply r = {ctx, s, status, argv[2], argv[3], JS_UNDEFINED, false};
+    if (s->state == SYNC)
+        write_head(&r, true);
+    else
+        uws_res_cork(0, s->res, &r, write_head_cb);
+    s->state = STREAM;
+    uws_res_on_aborted(0, s->res, on_aborted, (void *)(uintptr_t)i);
+    return JS_TRUE;
+}
+
+typedef struct {
+    uws_res_t *res;
+    const char *data;
+    size_t len;
+    bool ok;
+} Chunk;
+
+static void write_chunk_cb(void *data) {
+    Chunk *c = data;
+    size_t len = c->len;
+    c->ok = uws_res_write(0, c->res, c->data, &len);
+}
+
+// writeChunk(handle, bytes): 1 when written, 0 when the connection is
+// backpressured (wait with `whenWritable` before writing more), -1 when the
+// request is gone.
+static JSValue js_write_chunk(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || s->state != STREAM)
+        return JS_NewInt32(ctx, -1);
+    if (s->aborted) {
+        slot_free(i);
+        return JS_NewInt32(ctx, -1);
+    }
+    size_t len = 0;
+    const char *owned;
+    const uint8_t *b = bytes_of(ctx, argv[1], &len, &owned);
+    Chunk c = {s->res, (const char *)b, len, true};
+    if (b && len)
+        uws_res_cork(0, s->res, &c, write_chunk_cb);
+    if (owned)
+        JS_FreeCString(ctx, owned);
+    return JS_NewInt32(ctx, c.ok ? 1 : 0);
+}
+
+static void call_writable(uint32_t i, bool ok) {
+    JSContext *ctx = beyond_js_context();
+    Slot *s = &slots[i];
+    JSValue f = s->args[3];
+    if (!JS_IsFunction(ctx, f))
+        return;
+    s->args[3] = JS_UNDEFINED;
+    JSValue arg = JS_NewBool(ctx, ok);
+    JSValue r = JS_Call(ctx, f, JS_UNDEFINED, 1, &arg);
+    JS_FreeValue(ctx, f);
+    if (JS_IsException(r))
+        beyond_js_report();
+    JS_FreeValue(ctx, r);
+    if (beyond_js_run_jobs() < 0)
+        beyond_js_report();
+}
+
+static bool on_writable(uws_res_t *res, uint64_t offset, void *data) {
+    (void)offset;
+    uint32_t i = (uint32_t)(uintptr_t)data;
+    if (i >= nslots || slots[i].state != STREAM || slots[i].res != res)
+        return true;
+    uws_res_clear_on_writable(0, res);
+    call_writable(i, true);
+    return true;
+}
+
+// whenWritable(handle, callback): calls callback(true) once the connection
+// has drained (callback(false) if the request is aborted instead).
+static JSValue js_when_writable(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || s->state != STREAM || s->aborted)
+        return JS_FALSE;
+    JS_FreeValue(ctx, s->args[3]);
+    s->args[3] = JS_DupValue(ctx, argv[1]);
+    uws_res_on_writable(0, s->res, on_writable, (void *)(uintptr_t)i);
+    return JS_TRUE;
+}
+
+static void end_stream_cb(void *data) { uws_res_end_stream(0, data, false); }
+
+// endStream(handle, ok): ends a streamed response (`ok` false: the body
+// failed, the connection is closed without the final chunk).
+static JSValue js_end_stream(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double h;
+    uint32_t i;
+    if (JS_ToFloat64(ctx, &h, argv[0]))
+        return JS_EXCEPTION;
+    Slot *s = slot_of(h, &i);
+    if (!s || s->state != STREAM)
+        return JS_FALSE;
+    bool aborted = s->aborted;
+    uws_res_t *res = s->res;
+    slot_free(i);
+    if (aborted)
+        return JS_FALSE;
+    if (JS_ToBool(ctx, argv[1])) {
+        uws_res_cork(0, res, res, end_stream_cb);
+    } else {
+        uws_res_on_aborted(0, res, NULL, NULL);
+        uws_res_clear_on_writable(0, res);
+        us_socket_close((struct us_socket_t *)res, 0, NULL);
+    }
     return JS_TRUE;
 }
 
@@ -423,5 +599,9 @@ const JSCFunctionListEntry beyond_server_functions[] = {
     JS_CFUNC_DEF("serverPort", 1, js_server_port),
     JS_CFUNC_DEF("stopServer", 1, js_stop),
     JS_CFUNC_DEF("respond", 5, js_respond),
+    JS_CFUNC_DEF("respondStart", 4, js_respond_start),
+    JS_CFUNC_DEF("writeChunk", 2, js_write_chunk),
+    JS_CFUNC_DEF("whenWritable", 2, js_when_writable),
+    JS_CFUNC_DEF("endStream", 2, js_end_stream),
 };
 const int beyond_server_function_count = sizeof beyond_server_functions / sizeof *beyond_server_functions;

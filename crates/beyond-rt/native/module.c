@@ -4,6 +4,7 @@
 // (src/lib.rs); the functions here move values between them and JavaScript.
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "quickjs-libc.h"
@@ -26,10 +27,39 @@ extern const int beyond_server_function_count;
 extern const JSCFunctionListEntry beyond_web_functions[];
 extern const int beyond_web_function_count;
 
+// Promises rejected with no handler yet, and their reasons: reported once
+// the jobs running now are done, unless a handler is added by then.
+static JSValue *rejected;
+static int nrejected, cap_rejected;
+
 static void mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
     (void)opaque;
     JS_MarkValue(rt, on_timer, mark_func);
+    for (int i = 0; i < nrejected; i++)
+        JS_MarkValue(rt, rejected[i], mark_func);
     beyond_server_mark(rt, mark_func);
+}
+
+static void track_rejection(JSContext *c, JSValueConst promise, JSValueConst reason, bool is_handled, void *opaque) {
+    (void)opaque;
+    if (!is_handled) {
+        if (nrejected + 2 > cap_rejected) {
+            cap_rejected = cap_rejected ? cap_rejected * 2 : 16;
+            rejected = realloc(rejected, cap_rejected * sizeof *rejected);
+        }
+        rejected[nrejected++] = JS_DupValue(c, promise);
+        rejected[nrejected++] = JS_DupValue(c, reason);
+        return;
+    }
+    for (int i = 0; i < nrejected; i += 2) {
+        if (JS_IsSameValue(c, rejected[i], promise)) {
+            JS_FreeValue(c, rejected[i]);
+            JS_FreeValue(c, rejected[i + 1]);
+            memmove(rejected + i, rejected + i + 2, (nrejected - i - 2) * sizeof *rejected);
+            nrejected -= 2;
+            return;
+        }
+    }
 }
 
 JSContext *beyond_js_context(void) { return ctx; }
@@ -47,7 +77,22 @@ void beyond_js_report(void) {
 // once the task it was reported in is over, as Bun's does.
 static int uncaught;
 
-int beyond_js_uncaught(void) { return uncaught; }
+// Whether the program is to exit with 1: reportError reported an error,
+// or a promise was rejected with no handler (reported here, as Bun reports
+// an unhandled rejection: as an uncaught exception).
+int beyond_js_uncaught(void) {
+    if (nrejected > 0) {
+        beyond_flush_stdout();
+        for (int i = 0; i < nrejected; i += 2) {
+            JS_FreeValue(ctx, rejected[i]);
+            JS_Throw(ctx, rejected[i + 1]);
+            js_std_dump_error(ctx);
+        }
+        nrejected = 0;
+        uncaught = 1;
+    }
+    return uncaught;
+}
 
 // reportError(error): printed as an uncaught exception.
 static JSValue js_report_error(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -150,6 +195,7 @@ int beyond_init(JSContext *c, int argc, char **argv) {
     (void)argc, (void)argv;
     ctx = c;
     on_timer = JS_UNDEFINED;
+    JS_SetHostPromiseRejectionTracker(JS_GetRuntime(c), track_rejection, NULL);
     return JS_AddGCMarkHook(JS_GetRuntime(c), mark, NULL) < 0;
 }
 

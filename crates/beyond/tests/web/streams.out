@@ -1,0 +1,108 @@
+ReadableStream { locked: false, state: 'readable', supportsBYOB: false }
+{
+  a: ReadableStream { locked: false, state: 'readable', supportsBYOB: false },
+  b: [
+    ReadableStream { locked: false, state: 'readable', supportsBYOB: false }
+  ],
+}
+ReadableStream { locked: false, state: 'readable', supportsBYOB: true }
+ReadableStream { locked: false, state: 'errored', supportsBYOB: false }
+ReadableStream { locked: true, state: 'readable', supportsBYOB: false }
+WritableStream { locked: false, state: 'writable' } TransformStream {
+  readable: ReadableStream { locked: false, state: 'readable', supportsBYOB: false },
+  writable: WritableStream { locked: false, state: 'writable' },
+  backpressure: true
+}
+ReadableStreamDefaultReader {
+  stream: ReadableStream { locked: true, state: 'readable', supportsBYOB: false },
+  readRequests: 0,
+  close: Promise { <pending> }
+} WritableStreamDefaultWriter {
+  stream: WritableStream { locked: true, state: 'writable' },
+  close: Promise { <pending> },
+  ready: Promise { undefined },
+  desiredSize: 1
+}
+TextEncoderStream {
+  encoding: 'utf-8',
+  readable: ReadableStream { locked: false, state: 'readable', supportsBYOB: false },
+  writable: WritableStream { locked: false, state: 'writable' }
+} TextDecoderStream {
+  encoding: 'utf-8',
+  fatal: false,
+  ignoreBOM: false,
+  readable: ReadableStream { locked: false, state: 'readable', supportsBYOB: false },
+  writable: WritableStream { locked: false, state: 'writable' }
+}
+CountQueuingStrategy { highWaterMark: 3 } ByteLengthQueuingStrategy { highWaterMark: 3 }
+ReadableStreamDefaultController {}
+ReadableByteStreamController {}
+ReadableStreamBYOBReader {
+  stream: ReadableStream { locked: true, state: 'readable', supportsBYOB: true },
+  readIntoRequests: 0,
+  close: Promise { <pending> }
+}
+ReadableStreamBYOBRequest {
+  view: Uint8Array(4) [ 0, 0, 0, 0 ],
+  controller: ReadableByteStreamController {}
+}
+WritableStreamDefaultController { stream: WritableStream { locked: false, state: 'writable' } }
+TransformStreamDefaultController {
+  stream: TransformStream {
+    readable: ReadableStream {},
+    writable: WritableStream {},
+    backpressure: true
+  }
+}
+{
+  x: {
+    y: TransformStream {
+  readable: ReadableStream { locked: false, state: 'readable', supportsBYOB: false },
+  writable: WritableStream { locked: false, state: 'writable' },
+  backpressure: true
+},
+  },
+}
+[object ReadableStream] [object ReadableStream]
+[
+  "constructor", "locked", "cancel", "getReader", "pipeThrough", "pipeTo", "tee", "values", "blob",
+  "bytes", "json", "text"
+]
+hi
+Uint8Array(2) [ 1, 2 ]
+{
+  a: 1,
+}
+Blob (2 bytes)
+xy
+empty str body ReadableStream { locked: false, state: 'closed', supportsBYOB: false }
+no body null
+null body null
+body ReadableStream { locked: false, state: 'readable', supportsBYOB: false }
+same true
+bodyUsed after body false
+text after body hello
+bodyUsed after text true
+body after text ReadableStream { locked: false, state: 'closed', supportsBYOB: false }
+bodyUsed locked true
+text locked threw TypeError Body already used ERR_BODY_ALREADY_USED
+read {
+  value: Uint8Array(5) [ 104, 101, 108, 108, 111 ],
+  done: false,
+}
+bodyUsed after read true
+stream headers []
+stream text abcd
+stream text again threw TypeError Body already used ERR_BODY_ALREADY_USED
+locked stream threw TypeError Body object should not be disturbed or locked undefined
+string chunks str
+number chunks threw TypeError Expected text, ArrayBuffer or ArrayBufferView undefined
+asyncgen ab
+asyncgen fn a
+req stream hi
+req body ReadableStream { locked: false, state: 'readable', supportsBYOB: false }
+req nobody null
+clone stream [ "hi", "hi" ]
+blob stream text xy
+disturbed threw TypeError Body object should not be disturbed or locked undefined
+pipeThrough héllo wörld

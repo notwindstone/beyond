@@ -2,8 +2,9 @@
 // Response (or a promise of one), as Bun.serve. The native core
 // (crates/beyond-rt/native/server.c) runs uWebSockets.
 
-import { listen, respond, serverPort, stopServer } from "beyond:native";
+import { endStream, listen, respond, respondStart, serverPort, stopServer, whenWritable, writeChunk } from "beyond:native";
 import { Request, Response } from "./fetch.ts";
+import { chunkBytes, ReadableStream, ReadableStreamDefaultReader, readableStreamCancel } from "./streams.ts";
 
 export interface ServeOptions {
   port?: number | string;
@@ -50,7 +51,63 @@ function send(handle: number, res: unknown): void {
     send(handle, internalError(new TypeError("Expected a Response object from the fetch handler")));
     return;
   }
-  respond(handle, res.status, res.statusText, res._flat(), res._body);
+  const stream = res._stream;
+  // (A stream `body` made of the stored body, unread: the stored body.)
+  if (stream === null || (res._streamOfBody && !stream._disturbed && stream._reader === undefined)) {
+    respond(handle, res.status, res.statusText, res._flat(), res._body);
+    return;
+  }
+  sendStream(handle, res, stream);
+}
+
+/** Waits until the connection takes more (false: the request is gone). */
+function drained(handle: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!whenWritable(handle, resolve)) resolve(false);
+  });
+}
+
+/**
+ * Sends a response whose body is a stream: its head, then each chunk as
+ * it is read (chunked), waiting while the connection is backpressured (as
+ * Bun's server does with its HTTPServerWritable sink).
+ */
+async function sendStream(handle: number, res: Response, stream: ReadableStream<any>): Promise<void> {
+  if (stream._reader !== undefined || stream._disturbed) {
+    send(handle, internalError(new TypeError("The response's body stream is locked or disturbed")));
+    return;
+  }
+  res._used = true;
+  const reader = new ReadableStreamDefaultReader<any>(stream);
+  let started = false;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      const bytes = chunkBytes(value);
+      if (bytes.length === 0) continue;
+      if (!started) {
+        started = true;
+        if (!respondStart(handle, res.status, res.statusText, res._flat())) {
+          readableStreamCancel(stream, undefined);
+          return;
+        }
+      }
+      const written = writeChunk(handle, bytes);
+      if (written < 0 || (written === 0 && !(await drained(handle)))) {
+        // (The client went away.)
+        readableStreamCancel(stream, undefined);
+        return;
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    if (started) endStream(handle, false);
+    else send(handle, new Response("Internal Server Error", { status: 500 }));
+    return;
+  }
+  if (started) endStream(handle, true);
+  else respond(handle, res.status, res.statusText, res._flat(), null);
 }
 
 export function serve(options: ServeOptions): Server {

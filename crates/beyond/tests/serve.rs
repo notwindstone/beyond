@@ -27,6 +27,20 @@ fn request(port: u16, raw: &str) -> (Vec<String>, String) {
     (head, body.to_string())
 }
 
+/// A chunked body's content (None if it does not end with the last chunk).
+fn dechunk(mut body: &str) -> Option<String> {
+    let mut out = String::new();
+    loop {
+        let (size, rest) = body.split_once("\r\n")?;
+        let n = usize::from_str_radix(size.trim(), 16).ok()?;
+        if n == 0 {
+            return (rest == "\r\n").then_some(out);
+        }
+        out.push_str(rest.get(..n)?);
+        body = rest.get(n..)?.strip_prefix("\r\n")?;
+    }
+}
+
 fn get(port: u16, path: &str) -> (Vec<String>, String) {
     request(port, &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nUser-Agent: beyond-test\r\nConnection: close\r\n\r\n"))
 }
@@ -72,6 +86,32 @@ fn serve() {
     assert_eq!(head[0], "HTTP/1.1 201 Created");
     assert_eq!(body, "echo: abc");
 
+    // Bodies that are streams: chunked.
+    let (head, body) = get(port, "/stream");
+    assert_eq!(head[0], "HTTP/1.1 200 OK");
+    assert!(head.contains(&"transfer-encoding: chunked".into()), "{head:?}");
+    assert!(head.contains(&"content-type: text/x-stream".into()), "{head:?}");
+    assert_eq!(dechunk(&body).as_deref(), Some("abc"), "{body:?}");
+
+    let (_, body) = get(port, "/big");
+    let big = dechunk(&body).expect("a complete body");
+    assert_eq!(big.len(), 64 * 65536);
+    assert!(big.starts_with('a') && big.ends_with('l'), "{}", &big[big.len() - 10..]);
+
+    let (_, body) = get(port, "/generator");
+    assert_eq!(dechunk(&body).as_deref(), Some("xy"));
+
+    // A stream that fails midway: the connection is closed without the
+    // last chunk.
+    let (head, body) = get(port, "/broken");
+    assert_eq!(head[0], "HTTP/1.1 200 OK");
+    assert!(body.starts_with("4\r\npart\r\n") && dechunk(&body).is_none(), "{body:?}");
+
+    // The request's body, as the response's.
+    let (_, body) =
+        request(port, "POST /pipe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello");
+    assert_eq!(dechunk(&body).as_deref(), Some("hello"), "{body:?}");
+
     let (head, body) = get(port, "/throw");
     assert_eq!(head[0], "HTTP/1.1 500 Internal Server Error");
     assert_eq!(body, "Internal Server Error");
@@ -90,5 +130,6 @@ fn serve() {
     assert!(out.status.success(), "{:?}", out.status);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("Error: boom"), "{stderr}");
+    assert!(stderr.contains("Error: stream broke"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }

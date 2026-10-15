@@ -1,0 +1,22 @@
+# The web platform tests of streams (and encoding streams) that Beyond does
+# not pass, and why. tests/web.rs checks that every other test passes.
+#
+# No WebAssembly (QuickJS-NG has none): its memory's buffers are the
+# non-transferable ones.
+streams/readable-byte-streams/non-transferable-buffers.any.js: ReadableStream with byte source: enqueue() with a non-transferable buffer
+streams/readable-byte-streams/non-transferable-buffers.any.js: ReadableStream with byte source: read() with a non-transferable buffer
+streams/readable-byte-streams/non-transferable-buffers.any.js: ReadableStream with byte source: fill() with a non-transferable buffer
+streams/readable-byte-streams/non-transferable-buffers.any.js: ReadableStream with byte source: respondWithNewView() with a non-transferable buffer
+# No MessageChannel yet.
+encoding/streams/decode-utf8.any.js: decoding a transferred Uint8Array chunk should give no output
+encoding/streams/decode-utf8.any.js: decoding a transferred ArrayBuffer chunk should give no output
+# TextDecoder has UTF-8, UTF-16 and windows-1252, not the other legacy
+# encodings yet.
+encoding/streams/decode-attributes.any.js: encoding attribute should have correct value for 'iso-8859-2'
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to decode Shift_JIS
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to decode invalid sequences in Shift_JIS
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to reject invalid sequences in Shift_JIS
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to decode ISO-2022-JP
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to decode invalid sequences in ISO-2022-JP
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to reject invalid sequences in ISO-2022-JP
+encoding/streams/decode-non-utf8.any.js: TextDecoderStream should be able to decode ISO-8859-14
