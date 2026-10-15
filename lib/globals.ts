@@ -4,10 +4,12 @@
 
 import { now } from "beyond:native";
 import { structuredClone } from "./clone.ts";
+import { console } from "./console.ts";
 import { Crypto, crypto } from "./crypto.ts";
 import { TextDecoder, TextEncoder } from "./encoding.ts";
 import { AbortController, AbortSignal, CustomEvent, Event, EventTarget, reportError } from "./events.ts";
 import { Headers, Request, Response } from "./fetch.ts";
+import { inspect } from "./inspect.ts";
 import { serve } from "./serve.ts";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "./timers.ts";
 import { URL, URLSearchParams } from "./url.ts";
@@ -19,6 +21,7 @@ function define(name: string, value: unknown): void {
   Object.defineProperty(g, name, { value, writable: true, configurable: true, enumerable: false });
 }
 
+define("console", console);
 define("setTimeout", setTimeout);
 define("setInterval", setInterval);
 define("clearTimeout", clearTimeout);
@@ -41,4 +44,4 @@ define("Headers", Headers);
 define("Request", Request);
 define("Response", Response);
 if (g.self === undefined) define("self", globalThis);
-define("Beyond", { serve, version: "0.1.0" });
+define("Beyond", { serve, inspect, version: "0.1.0" });

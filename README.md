@@ -76,6 +76,13 @@ networking code uses its extensions) and zlib.
   `signal`, `handleEvent` objects), `AbortController` and `AbortSignal`
   (`abort`, `timeout`, `any`, `onabort`), `reportError` (as Bun's: the error
   is printed and the program exits with 1 after the current task).
+- `console`, formatting values as Bun does (its formatter's rules, ported:
+  objects one property a line, arrays on one line until 80 columns, quoted
+  strings inside values, `[Object ...]` past depth 2, `[Circular]`, class
+  names, Map/Set/typed arrays/promises, `%s %d %i %f %o %O %j %c`), and
+  Beyond's classes print as Bun's do; `group`, `count`, `time`, `assert`,
+  `trace`; `Beyond.inspect`. Standard output is buffered (flushed before
+  the event loop waits, before standard error is written, and at exit).
 - `crypto.getRandomValues` and `crypto.randomUUID` (from the kernel, through
   a buffer), `structuredClone` (with `transfer`), `self`; and from
   QuickJS-NG, `queueMicrotask`, `atob`, `btoa`, `DOMException`.
@@ -84,8 +91,8 @@ The tests (`cargo test`) run programs whose output must be Bun's, the WPT
 URL data, and a server answering over TCP.
 
 Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Blob` and `FormData`,
-`fetch` (the client), `crypto.subtle`, and `console.log` formats arrays and
-objects as QuickJS-NG does, not as Bun.
+`fetch` (the client), `crypto.subtle`; errors print without Bun's source
+excerpt, and their stacks' lines are the bundle's.
 
 ## Performance
 

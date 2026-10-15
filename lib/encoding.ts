@@ -4,6 +4,7 @@
 // web.c and encoding.rs); the rest is here.
 
 import { decodeUtf8, encodeUtf8, encodeUtf8Into } from "beyond:native";
+import { describe, Formatter } from "./inspect.ts";
 
 export interface TextEncoderEncodeIntoResult {
   read: number;
@@ -30,6 +31,11 @@ export class TextEncoder {
 
   get [Symbol.toStringTag](): string {
     return "TextEncoder";
+  }
+
+  [describe](f: Formatter): void {
+    const p = TextEncoder.prototype;
+    f.record("TextEncoder", [["encoding", "utf-8"], ["encode", p.encode], ["encodeInto", p.encodeInto]]);
   }
 }
 
@@ -212,6 +218,15 @@ export class TextDecoder {
 
   get [Symbol.toStringTag](): string {
     return "TextDecoder";
+  }
+
+  [describe](f: Formatter): void {
+    f.record("TextDecoder", [
+      ["decode", TextDecoder.prototype.decode],
+      ["encoding", this.encoding],
+      ["fatal", this._fatal],
+      ["ignoreBOM", this._ignoreBOM],
+    ]);
   }
 }
 

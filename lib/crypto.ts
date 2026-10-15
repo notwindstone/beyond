@@ -3,6 +3,7 @@
 // web.c). `crypto.subtle` is not there yet.
 
 import { randomFill, randomUUID as nativeUUID } from "beyond:native";
+import { describe, Formatter } from "./inspect.ts";
 
 /** Whether `a` is a typed array of integers (what getRandomValues fills). */
 function integerArray(a: unknown): boolean {
@@ -43,6 +44,11 @@ export class Crypto {
 
   get [Symbol.toStringTag](): string {
     return "Crypto";
+  }
+
+  [describe](f: Formatter): void {
+    const p = Crypto.prototype;
+    f.record("Crypto", [["getRandomValues", p.getRandomValues], ["randomUUID", p.randomUUID]]);
   }
 }
 

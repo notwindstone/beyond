@@ -3,6 +3,7 @@
 // reportError.
 
 import { now, reportError as nativeReportError } from "beyond:native";
+import { describe, Formatter } from "./inspect.ts";
 import { setTimeout } from "./timers.ts";
 
 const NONE = 0;
@@ -130,6 +131,34 @@ export class Event {
 
   get [Symbol.toStringTag](): string {
     return "Event";
+  }
+
+  [describe](f: Formatter): void {
+    const p = Event.prototype;
+    f.record(this.constructor.name, [
+      ["isTrusted", this.isTrusted],
+      ["type", this._type],
+      ["target", this._target],
+      ["currentTarget", this._currentTarget],
+      ["eventPhase", this._phase],
+      ["cancelBubble", this._stop],
+      ["bubbles", this._bubbles],
+      ["cancelable", this._cancelable],
+      ["defaultPrevented", this._canceled],
+      ["composed", this._composed],
+      ["timeStamp", this._timeStamp],
+      ["srcElement", this._target],
+      ["returnValue", !this._canceled],
+      ["composedPath", p.composedPath],
+      ["stopPropagation", p.stopPropagation],
+      ["stopImmediatePropagation", p.stopImmediatePropagation],
+      ["preventDefault", p.preventDefault],
+      ["initEvent", p.initEvent],
+      ["NONE", NONE],
+      ["CAPTURING_PHASE", CAPTURING_PHASE],
+      ["AT_TARGET", AT_TARGET],
+      ["BUBBLING_PHASE", BUBBLING_PHASE],
+    ]);
   }
 }
 
@@ -274,6 +303,15 @@ export class EventTarget {
   get [Symbol.toStringTag](): string {
     return "EventTarget";
   }
+
+  [describe](f: Formatter): void {
+    const p = EventTarget.prototype;
+    f.record(this.constructor.name, [
+      ["addEventListener", p.addEventListener],
+      ["removeEventListener", p.removeEventListener],
+      ["dispatchEvent", p.dispatchEvent],
+    ]);
+  }
 }
 
 function invoke(target: EventTarget, event: Event, list: Listener[], snapshot: Listener[], capture: boolean): void {
@@ -398,6 +436,20 @@ export class AbortSignal extends EventTarget {
   get [Symbol.toStringTag](): string {
     return "AbortSignal";
   }
+
+  [describe](f: Formatter): void {
+    const p = AbortSignal.prototype;
+    const t = EventTarget.prototype;
+    f.record("AbortSignal", [
+      ["aborted", this._aborted],
+      ["reason", this._reason],
+      ["onabort", this._handler],
+      ["throwIfAborted", p.throwIfAborted],
+      ["addEventListener", t.addEventListener],
+      ["removeEventListener", t.removeEventListener],
+      ["dispatchEvent", t.dispatchEvent],
+    ]);
+  }
 }
 
 function signalAbort(s: AbortSignal, reason: any): void {
@@ -441,5 +493,12 @@ export class AbortController {
 
   get [Symbol.toStringTag](): string {
     return "AbortController";
+  }
+
+  [describe](f: Formatter): void {
+    f.record("AbortController", [
+      ["signal", this._signal],
+      ["abort", AbortController.prototype.abort],
+    ]);
   }
 }

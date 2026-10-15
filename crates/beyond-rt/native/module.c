@@ -36,7 +36,12 @@ JSContext *beyond_js_context(void) { return ctx; }
 
 // An exception nothing caught (in a callback the loop made): printed, as
 // Bun prints an error a handler threw.
-void beyond_js_report(void) { js_std_dump_error(ctx); }
+void beyond_flush_stdout(void);
+
+void beyond_js_report(void) {
+    beyond_flush_stdout();
+    js_std_dump_error(ctx);
+}
 
 // Set when reportError reported an error: the program then exits with 1
 // once the task it was reported in is over, as Bun's does.
@@ -46,6 +51,7 @@ int beyond_js_uncaught(void) { return uncaught; }
 
 // reportError(error): printed as an uncaught exception.
 static JSValue js_report_error(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    beyond_flush_stdout();
     JS_Throw(c, JS_DupValue(c, argc > 0 ? argv[0] : JS_UNDEFINED));
     js_std_dump_error(c);
     uncaught = 1;
@@ -149,5 +155,8 @@ int beyond_init(JSContext *c, int argc, char **argv) {
 
 int beyond_loop(JSContext *c) {
     (void)c;
-    return beyond_rt_loop();
+    int r = beyond_rt_loop();
+    // (Before an exception the program's exit prints, and the exit.)
+    beyond_flush_stdout();
+    return r;
 }

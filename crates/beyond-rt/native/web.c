@@ -4,8 +4,11 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/random.h>
+#include <unistd.h>
 
 #include "quickjs.h"
 
@@ -176,7 +179,60 @@ static JSValue js_random_uuid(JSContext *c, JSValueConst this_val, int argc, JSV
     return JS_NewStringLen(c, s, sizeof s);
 }
 
+// ---- The console's output ----
+
+// Standard output is buffered (flushed before the event loop waits, before
+// anything goes to standard error, and at exit), unless it is a terminal.
+static int stdout_tty = -1;
+
+void beyond_flush_stdout(void) { fflush(stdout); }
+
+// writeOut(fd, string): the string's UTF-8 (lone surrogates as U+FFFD) to
+// standard output (1) or standard error (2).
+static JSValue js_write_out(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    int32_t fd;
+    size_t len;
+    if (JS_ToInt32(c, &fd, argv[0]))
+        return JS_EXCEPTION;
+    const char *s = JS_ToCStringLen(c, &len, argv[1]);
+    if (!s)
+        return JS_EXCEPTION;
+    const char *data = s;
+    char *copy = NULL;
+    if (memchr(s, 0xED, len)) {
+        copy = malloc(len);
+        if (copy) {
+            memcpy(copy, s, len);
+            beyond_rt_wtf8_fix((uint8_t *)copy, len);
+            data = copy;
+        }
+    }
+    if (fd == 2) {
+        fflush(stdout);
+        fwrite(data, 1, len, stderr);
+    } else {
+        if (stdout_tty < 0)
+            stdout_tty = isatty(1);
+        fwrite(data, 1, len, stdout);
+        if (stdout_tty)
+            fflush(stdout);
+    }
+    free(copy);
+    JS_FreeCString(c, s);
+    return JS_UNDEFINED;
+}
+
+// promiseState(value): -1 if not a promise, 0 pending, 1 fulfilled, 2
+// rejected.
+static JSValue js_promise_state(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (!JS_IsPromise(argv[0]))
+        return JS_NewInt32(c, -1);
+    return JS_NewInt32(c, (int)JS_PromiseState(c, argv[0]));
+}
+
 const JSCFunctionListEntry beyond_web_functions[] = {
+    JS_CFUNC_DEF("writeOut", 2, js_write_out),
+    JS_CFUNC_DEF("promiseState", 1, js_promise_state),
     JS_CFUNC_DEF("encodeUtf8", 1, js_encode_utf8),
     JS_CFUNC_DEF("encodeUtf8Into", 2, js_encode_utf8_into),
     JS_CFUNC_DEF("decodeUtf8", 2, js_decode_utf8),

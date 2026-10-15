@@ -3,6 +3,7 @@
 // deadlines (crates/beyond-rt); the callbacks are kept here.
 
 import { clearTimer, onTimer, refTimer, setTimer } from "beyond:native";
+import { describe, Formatter } from "./inspect.ts";
 
 type Callback = (...args: any[]) => void;
 
@@ -56,6 +57,9 @@ export class Timeout {
   }
   [Symbol.toPrimitive](): number {
     return this._id;
+  }
+  [describe](f: Formatter): void {
+    f.write(`Timeout (#${this._id})`);
   }
 }
 

@@ -26,6 +26,7 @@ unsafe extern "C" {
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
+    fn beyond_flush_stdout();
 }
 
 /// Nanoseconds since the program started.
@@ -161,6 +162,9 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         if polls == 0 && !refd {
             return 0;
         }
+        // (What the console wrote, before waiting.)
+        // SAFETY: plain C stdio.
+        unsafe { beyond_flush_stdout() };
         let now = now_ns();
         let wait = next.map(|d| d.saturating_sub(now));
         if polls == 0 {

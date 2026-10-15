@@ -1,0 +1,330 @@
+--- str
+hello
+--- num
+42
+--- neg0
+-0
+--- float
+1.5
+--- nan
+NaN
+--- big
+10n
+--- bool
+true
+--- null
+null
+--- undef
+undefined
+--- sym
+Symbol(s)
+--- arr
+[ 1, "two", null, undefined, [ 3, [ 4, [ 5, [ 6 ] ] ] ] ]
+--- empty arr
+[]
+--- sparse
+[ 1, empty item, 3 ]
+--- obj
+{
+  a: 1,
+  b: "x",
+  c: {
+    d: [ 1, 2 ],
+  },
+}
+--- empty obj
+{}
+--- nested
+{
+  a: {
+    b: {
+      c: [Object ...],
+    },
+  },
+}
+--- class
+Point {
+  x: 1,
+  y: 2,
+}
+--- empty class
+Empty {}
+--- map
+Map(2) {
+  "a": 1,
+  2: {
+    b: 3,
+  },
+}
+--- set
+Set(2) {
+  1,
+  "x",
+}
+--- fn
+[Function: named]
+--- arrow
+[Function]
+--- anon
+[Function]
+--- classref
+[class Point]
+--- date
+1970-01-01T00:00:00.000Z
+--- regex
+/ab+c/gi
+--- long arr
+[
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+  23, 24, 25, 26, 27, 28, 29
+]
+--- long strs
+[ "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb", "cccccccccccccccccccc", "dddddddddddddddddddddd" ]
+--- obj keys
+{
+  "3": 2,
+  "a-b": 1,
+  [Symbol(k)]: 3,
+}
+--- str in arr
+[ "it's", "say \"hi\"" ]
+--- headers
+Headers {
+  "content-type": "text/plain",
+}
+--- url
+URL {
+  href: 'https://a.b/c?d=1',
+  origin: 'https://a.b',
+  protocol: 'https:',
+  username: '',
+  password: '',
+  host: 'a.b',
+  hostname: 'a.b',
+  port: '',
+  pathname: '/c',
+  search: '?d=1',
+  searchParams: URLSearchParams { 'd' => '1' },
+  hash: ''
+}
+--- usp
+URLSearchParams {
+  "a": "1",
+  "b": "2",
+}
+--- boxed
+[Number: 3]
+--- nullproto
+[Object: null prototype] {}
+--- getter
+{
+  g: [Getter],
+}
+--- weakmap
+WeakMap {}
+--- mixed arr
+[
+  {
+    a: 1,
+  }, {
+    b: 2,
+  }
+]
+--- multi
+a 1 {
+  x: 1,
+} [ 2 ]
+--- fmt
+Bob is 42 years and 42, 1.5, {
+  a: 1,
+} {
+  b: 2,
+} {"c":3} % extra
+--- response
+Response (2 bytes) {
+  ok: true,
+  url: "",
+  status: 200,
+  statusText: "",
+  headers: Headers {},
+  redirected: false,
+  bodyUsed: false,
+  Blob (2 bytes)
+}
+--- request
+Request (0 KB) {
+  method: "GET",
+  url: "https://x.y/z",
+  headers: Headers {}
+}
+Headers {
+  "accept": "x",
+  "x-y": "z",
+}
+[
+  Headers {
+    "a": "1",
+  }
+]
+{
+  h: Headers {},
+}
+Response (2 bytes) {
+  ok: true,
+  url: "",
+  status: 201,
+  statusText: "",
+  headers: Headers {
+    "a": "b",
+  },
+  redirected: false,
+  bodyUsed: false,
+  Blob (2 bytes)
+}
+Request (3 bytes) {
+  method: "POST",
+  url: "https://x.y/z",
+  headers: Headers {
+    "a": "b",
+  }
+  Blob (3 bytes)
+}
+URLSearchParams {}
+{
+  u: URL {
+  href: 'https://a.b/',
+  origin: 'https://a.b',
+  protocol: 'https:',
+  username: '',
+  password: '',
+  host: 'a.b',
+  hostname: 'a.b',
+  port: '',
+  pathname: '/',
+  search: '',
+  searchParams: URLSearchParams {},
+  hash: ''
+},
+}
+AbortController {
+  signal: AbortSignal {
+    aborted: false,
+    reason: undefined,
+    onabort: null,
+    throwIfAborted: [Function: throwIfAborted],
+    addEventListener: [Function: addEventListener],
+    removeEventListener: [Function: removeEventListener],
+    dispatchEvent: [Function: dispatchEvent],
+  },
+  abort: [Function: abort],
+}
+TextEncoder {
+  encoding: "utf-8",
+  encode: [Function: encode],
+  encodeInto: [Function: encodeInto],
+} TextDecoder {
+  decode: [Function: decode],
+  encoding: "utf-8",
+  fatal: false,
+  ignoreBOM: false,
+}
+Timeout (#1)
+[AsyncFunction: af] [GeneratorFunction: gf] [class (anonymous) extends Array] [Function: max]
+[ 1.5, -0, 2147483648, 1e+21, 0.000001, 1e-7 ]
+Map(1) {
+  {
+    a: 1,
+  }: [ 1, 2 ],
+}
+{
+  s: Set(1) {
+    [ 1 ],
+  },
+  m: Map {},
+}
+[
+  [Function], Symbol(), Symbol(Symbol.iterator)
+]
+1.5|[object Object]|1|null rest
+42|-3|NaN
+a  b c
+e1 1
+70 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+74 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+78 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+82 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+86 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+90 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb", "cccccccccc" ]
+94 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb",
+  "cccccccccc"
+]
+98 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb",
+  "cccccccccc"
+]
+102 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbb",
+  "cccccccccc"
+]
+106 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bbbbbbbbbb", "cccccccccc"
+]
+110 [ "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bbbbbbbbbb", "cccccccccc"
+]
+[ 0 ]
+[ 0, 1000, 2000, 3000 ]
+[ 0, 1000, 2000, 3000, 4000, 5000, 6000 ]
+[ 0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000 ]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000,
+  26000, 27000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000,
+  26000, 27000, 28000, 29000, 30000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000,
+  26000, 27000, 28000, 29000, 30000, 31000, 32000, 33000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000,
+  26000, 27000, 28000, 29000, 30000, 31000, 32000, 33000, 34000, 35000, 36000
+]
+[
+  0, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 11000, 12000, 13000,
+  14000, 15000, 16000, 17000, 18000, 19000, 20000, 21000, 22000, 23000, 24000, 25000,
+  26000, 27000, 28000, 29000, 30000, 31000, 32000, 33000, 34000, 35000, 36000, 37000,
+  38000, 39000
+]
+[
+  [ 1, 2 ], [ 3, 4 ]
+]
+{
+  a: [ 1, 2, 3 ],
+  b: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  c: [ 1 ],
+}
+[ "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" ]

@@ -5,6 +5,7 @@
 // lower case), IPv4 and IPv6 addresses, and opaque hosts.
 
 import { decodeUtf8, encodeUtf8 } from "beyond:native";
+import { describe, Formatter, inspectCustom } from "./inspect.ts";
 
 // ---- Code points and percent-encoding ----
 
@@ -1498,6 +1499,15 @@ export class URLSearchParams {
   get [Symbol.toStringTag](): string {
     return "URLSearchParams";
   }
+
+  [describe](f: Formatter): void {
+    f.record("URLSearchParams", this._list.map((p) => [p[0], p[1]]), { quoteKeys: true });
+  }
+}
+
+/** A string as Node's util.inspect quotes it. */
+function nodeQuote(s: string): string {
+  return `'${s.replaceAll("\\", "\\\\").replaceAll("'", "\\'").replaceAll("\n", "\\n")}'`;
 }
 
 // ---- URL ----
@@ -1702,5 +1712,18 @@ export class URL {
 
   get [Symbol.toStringTag](): string {
     return "URL";
+  }
+
+  /** As Bun prints a URL: Node's util.inspect format. */
+  [inspectCustom](): string {
+    const q = nodeQuote;
+    const params = this.searchParams._list.map((p) => `${q(p[0])} => ${q(p[1])}`);
+    const sp = params.length === 0 ? "URLSearchParams {}" : `URLSearchParams { ${params.join(", ")} }`;
+    return (
+      `URL {\n  href: ${q(this.href)},\n  origin: ${q(this.origin)},\n  protocol: ${q(this.protocol)},\n` +
+      `  username: ${q(this.username)},\n  password: ${q(this.password)},\n  host: ${q(this.host)},\n` +
+      `  hostname: ${q(this.hostname)},\n  port: ${q(this.port)},\n  pathname: ${q(this.pathname)},\n` +
+      `  search: ${q(this.search)},\n  searchParams: ${sp},\n  hash: ${q(this.hash)}\n}`
+    );
   }
 }

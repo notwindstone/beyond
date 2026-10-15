@@ -9,6 +9,7 @@
 // request the server answers.
 
 import { decodeUtf8, encodeUtf8 } from "beyond:native";
+import { describe, Formatter } from "./inspect.ts";
 
 export type HeadersInit = Headers | [string, string][] | Record<string, string>;
 export type BodyInit = string | ArrayBuffer | ArrayBufferView | null;
@@ -188,6 +189,10 @@ export class Headers {
   get [Symbol.toStringTag](): string {
     return "Headers";
   }
+
+  [describe](f: Formatter): void {
+    f.record("Headers", [...this.entries()], { quoteKeys: true });
+  }
 }
 
 /** A body as stored: a string, the bytes, or none. */
@@ -204,6 +209,17 @@ function store(body: BodyInit | undefined): Stored {
     return String(body);
   }
   throw new TypeError("Unsupported body type (streams, Blob and FormData are not supported yet)");
+}
+
+/** A stored body's size in bytes. */
+function bodySize(b: Stored): number {
+  if (b === null) return 0;
+  return typeof b === "string" ? encodeUtf8(b).length : b.byteLength;
+}
+
+/** How Bun names a body's size: "(N bytes)", or "(0 KB)" when empty. */
+function sizeLabel(n: number): string {
+  return n === 0 ? "(0 KB)" : `(${n} bytes)`;
 }
 
 /** What `fetch`'s bodies have in common (Body mixin). */
@@ -258,10 +274,13 @@ const JSON_TYPE = "application/json;charset=utf-8";
 export class Response extends Body {
   readonly status: number;
   readonly statusText: string;
-  // The headers; null until read when the init had none (most responses),
-  // then only `_contentType` (if not null) is to be sent.
+  // The headers; null until read when the init had none (most responses).
   _headers: Headers | null = null;
+  // A content type the headers have but are not made with yet
+  // (Response.json), and the one a string body is sent with if the
+  // headers have none (as Bun's, not in the headers).
   _contentType: string | null = null;
+  _defaultType: string | null = null;
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     super(store(body));
@@ -278,13 +297,8 @@ export class Response extends Body {
     }
     this.status = status;
     this.statusText = statusText;
-    if (headers !== undefined) {
-      const h = new Headers(headers);
-      if (typeof this._body === "string" && !h.has("content-type")) h.set("content-type", TEXT);
-      this._headers = h;
-    } else if (typeof this._body === "string") {
-      this._contentType = TEXT;
-    }
+    if (headers !== undefined) this._headers = new Headers(headers);
+    if (typeof this._body === "string") this._defaultType = TEXT;
   }
 
   get headers(): Headers {
@@ -293,6 +307,7 @@ export class Response extends Body {
       h = new Headers();
       if (this._contentType !== null) h.append("content-type", this._contentType);
       this._headers = h;
+      this._contentType = null;
     }
     return h;
   }
@@ -300,8 +315,13 @@ export class Response extends Body {
   /** The headers as the server writes them: [name, value, ...]. */
   _flat(): string[] {
     const h = this._headers;
-    if (h !== null) return h._flat();
-    return this._contentType === null ? [] : ["content-type", this._contentType];
+    if (h === null) {
+      const type = this._contentType ?? this._defaultType;
+      return type === null ? [] : ["content-type", type];
+    }
+    const flat = h._flat();
+    if (this._defaultType !== null && !h.has("content-type")) flat.push("content-type", this._defaultType);
+    return flat;
   }
 
   get type(): string {
@@ -327,10 +347,9 @@ export class Response extends Body {
 
   static json(data: any, init?: ResponseInit): Response {
     const r = new Response(JSON.stringify(data), init);
+    r._defaultType = null;
     if (r._headers === null) r._contentType = JSON_TYPE;
-    else if (init === undefined || init === null || !new Headers(init.headers).has("content-type")) {
-      r._headers.set("content-type", JSON_TYPE);
-    }
+    else if (!r._headers.has("content-type")) r._headers.set("content-type", JSON_TYPE);
     return r;
   }
 
@@ -350,6 +369,23 @@ export class Response extends Body {
 
   get [Symbol.toStringTag](): string {
     return "Response";
+  }
+
+  [describe](f: Formatter): void {
+    const size = bodySize(this._body);
+    f.record(
+      `Response ${sizeLabel(size)}`,
+      [
+        ["ok", this.ok],
+        ["url", this.url],
+        ["status", this.status],
+        ["statusText", this.statusText],
+        ["headers", this.headers],
+        ["redirected", this.redirected],
+        ["bodyUsed", this.bodyUsed],
+      ],
+      { tail: size > 0 ? `Blob (${size} bytes)` : undefined },
+    );
   }
 }
 
@@ -426,5 +462,18 @@ export class Request extends Body {
 
   get [Symbol.toStringTag](): string {
     return "Request";
+  }
+
+  [describe](f: Formatter): void {
+    const size = bodySize(this._body);
+    f.record(
+      `Request ${sizeLabel(size)}`,
+      [
+        ["method", this.method],
+        ["url", this.url],
+        ["headers", this.headers],
+      ],
+      { tail: size > 0 ? `Blob (${size} bytes)` : undefined, lastComma: false },
+    );
   }
 }

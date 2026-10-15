@@ -33,6 +33,14 @@ fn globals() {
 }
 
 #[test]
+fn console() {
+    // console.log's formats: Bun's, for each kind of value.
+    let (out, err, ok) = run("console");
+    assert_eq!(out, expected("console"));
+    assert!(ok, "{err}");
+}
+
+#[test]
 fn url() {
     let (out, err, ok) = run("url");
     assert_eq!(out, expected("url"));
