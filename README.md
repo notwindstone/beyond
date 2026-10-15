@@ -153,14 +153,33 @@ server runs on:
 
 | | requests/s | p99 latency | memory (RSS) |
 |---|---|---|---|
-| Beyond, text | 98,016 | 1.34 ms | 21 MB |
-| Bun, text | 89,400 | 1.62 ms | 24 MB |
-| Beyond, JSON | 92,627 | 1.35 ms | 21 MB |
-| Bun, JSON | 84,799 | 1.69 ms | 25 MB |
+| Beyond, text | 90,843 | 1.57 ms | 22 MB |
+| Bun, text | 82,658 | 1.82 ms | 20 MB |
+| Beyond, JSON | 94,530 | 1.35 ms | 22 MB |
+| Bun, JSON | 77,827 | 1.82 ms | 21 MB |
 
-Beyond answers about 10% more text and 9% more JSON requests a second than
-Bun, with lower tail latency, in about 85% of the memory (the load
-generator shares the cores). What got it there:
+Beyond answers about 10% more text and 21% more JSON requests a second
+than Bun, with lower tail latency, in about as much memory (the load
+generator shares the cores; the mean of two runs each).
+
+JSON of bigger objects, typed (`aot type`) or not (`bench/run.sh json`):
+a user of 7 fields with a nested point made for each request
+(bench/serve-user.ts, 105 bytes), and a list of 50 of them made once
+(bench/serve-users.ts, 5.7 KB). Beyond runs each with the objects typed
+and plain (the same program with `type`); Bun has no typed objects:
+
+| | one user | p99 | 50 users | p99 |
+|---|---|---|---|---|
+| Beyond, typed | 86,587 | 1.44 ms | 45,638 | 2.55 ms |
+| Beyond, plain | 84,218 | 1.54 ms | 34,781 | 3.16 ms |
+| Bun | 75,623 | 1.91 ms | 39,387 | 2.96 ms |
+
+With one small object, writing the JSON is a small part of a request,
+and Beyond answers 11–15% more than Bun either way. With 50, typed
+objects answer 31% more requests than plain ones, and 16% more than Bun;
+plain ones 12% fewer than Bun (the general fast path reads each object's
+keys from its shape, checking each one, where a typed object's are
+encoded once). All use 21–23 MB. What got it there:
 
 - The request path is native code: `Headers`, `Request` and `Response`
   keep their state in plain fields and check without regular expressions
