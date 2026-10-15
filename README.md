@@ -199,6 +199,24 @@ encoded once). All use 21–23 MB. What got it there:
   one in about the time Bun takes, 100 of them in about half
   (`Response.json` of them too).
 
+A Hono 4.13 app (bench/hono: text, JSON and path parameter routes, and a
+middleware that sets a header after the handler, `bench/run.sh hono`):
+
+| | text | JSON | `/users/:id` | memory |
+|---|---|---|---|---|
+| Beyond | 37,005 | 35,946 | 32,540 | 26 MB |
+| Bun | 51,795 | 48,547 | 47,357 | 33 MB |
+
+Beyond answers 69-74% as many requests a second as Bun (it answered
+about half before Luminous compiled Hono's classes: written as class
+expressions, with private fields, private methods and fields that are
+arrow functions), in 79% of the memory. Its responses are Bun's but for
+the case of header names. What Hono still costs more here: the closures
+and objects each request makes (about 30 of each), the response its
+middleware makes again with its headers copied, and its router's
+`match`, a function using `this` outside a class, which stays
+interpreted.
+
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
 read with `text()` (bench/fetch.ts), three rounds a run, two runs each:

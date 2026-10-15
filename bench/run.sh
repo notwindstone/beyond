@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Beyond against Bun, runs alternated: the server (`oha -c 50` for 10 s, the
 # text and the JSON program), JSON of typed (`aot type`) and plain objects
-# from the server, the fetch() client (1, 10 and 50 in flight, against a
-# Beyond server) and URL parsing. Needs bun and oha on PATH, and Beyond
-# built (cargo build --release).
+# from the server, a Hono app (bench/hono), the fetch() client (1, 10 and 50
+# in flight, against a Beyond server) and URL parsing. Needs bun and oha on
+# PATH, and Beyond built (cargo build --release).
 #
-#   bench/run.sh [serve|json|fetch|url]...
+#   bench/run.sh [serve|json|hono|fetch|url]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
 beyond=target/release/beyond
@@ -37,13 +37,13 @@ stop() {
   wait 2>/dev/null || true
 }
 
-# Loads the running server for 10 s: requests a second, p99 latency and
-# its memory (labeled $1 $2).
+# Loads the running server for 10 s (at path $3, else /): requests a
+# second, p99 latency and its memory (labeled $1 $2).
 measure() {
   local pid rss
   pid=$(jobs -p | tail -1)
   printf '%-11s %-6s ' "$1" "$2"
-  oha -c 50 -z 10s --no-tui --output-format json http://127.0.0.1:3000/ > "$work/oha.json"
+  oha -c 50 -z 10s --no-tui --output-format json "http://127.0.0.1:3000${3:-/}" > "$work/oha.json"
   rss=$(ps -o rss= -p "$(pgrep -P "$pid" || echo "$pid")" | tail -1)
   python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d["summary"]; p=d["latencyPercentiles"]; print("%8.0f requests/s  p99 %.2f ms  RSS %d MB" % (s["requestsPerSec"], p["p99"]*1000, int(sys.argv[2])//1024))' "$work/oha.json" "$rss"
 }
@@ -81,6 +81,22 @@ json() {
       done
     done
   done
+}
+
+# A Hono app (bench/hono, its dependency installed with bun): its text,
+# JSON and path parameter routes, through its middleware.
+hono() {
+  [ -d bench/hono/node_modules ] || (cd bench/hono && bun install > /dev/null)
+  sed 's/Beyond\.serve/Bun.serve/' bench/hono/app.ts > bench/hono/app.bun.ts
+  "$beyond" build bench/hono/app.ts -o "$work/hono" > /dev/null
+  for round in 1 2; do
+    for who in beyond bun; do
+      if [ $who = beyond ]; then serving "$work/hono"; else serving bun bench/hono/app.bun.ts; fi
+      for path in / /json /users/42; do measure "hono $path" "$who" "$path"; done
+      stop
+    done
+  done
+  rm -f bench/hono/app.bun.ts
 }
 
 # Runs a command; its output on one line, then its peak memory.

@@ -80,6 +80,12 @@ function isSpace(c: number): boolean {
 /** A header value: without leading and trailing whitespace. */
 function normalizeValue(value: string): string {
   let v = String(value);
+  // (Most values: nothing to trim and no byte to refuse, found by the
+  // engine's searches rather than a loop over the characters.)
+  const n = v.length;
+  if (n > 0 && !isSpace(v.charCodeAt(0)) && !isSpace(v.charCodeAt(n - 1)) && v.indexOf("\n") < 0 && v.indexOf("\r") < 0 && v.indexOf("\0") < 0) {
+    return v;
+  }
   let start = 0;
   let end = v.length;
   while (start < end && isSpace(v.charCodeAt(start))) start++;

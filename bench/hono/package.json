@@ -1,0 +1,8 @@
+{
+  "name": "beyond-bench-hono",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "hono": "4.13.13"
+  }
+}
