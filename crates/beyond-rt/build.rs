@@ -1,6 +1,7 @@
 //! Compiles what the static library holds besides Rust: Bun's uSockets,
-//! uWebSockets and its C interface (vendor/), Beyond's hooks for them, and
-//! the QuickJS bindings (native/), against Luminous's engine headers.
+//! uWebSockets and its C interface, picohttpparser and zstd's decoder
+//! (vendor/), Beyond's hooks for them, and the QuickJS bindings (native/),
+//! against Luminous's engine headers.
 
 use std::path::{Path, PathBuf};
 
@@ -27,11 +28,15 @@ fn main() {
         .define("LIBUS_USE_OPENSSL", None)
         .include(shim)
         .include(&usockets)
+        .include(vendor.join("picohttpparser"))
+        .include(vendor.join("zstd"))
         .include(&quickjs);
+    c.file(vendor.join("picohttpparser/picohttpparser.c"));
+    c.file(vendor.join("zstd/zstddeclib.c"));
     for f in ["bsd.c", "context.c", "loop.c", "socket.c", "udp.c", "eventing/epoll_kqueue.c"] {
         c.file(usockets.join(f));
     }
-    for f in ["native/bun_hooks.c", "native/stubs.c", "native/module.c", "native/server.c", "native/web.c"] {
+    for f in ["native/bun_hooks.c", "native/stubs.c", "native/module.c", "native/server.c", "native/web.c", "native/client.c"] {
         c.file(f);
     }
     c.compile("beyond_c");
@@ -57,5 +62,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", vendor.join("bun-usockets").display());
     println!("cargo:rerun-if-changed={}", vendor.join("bun-uws").display());
     println!("cargo:rerun-if-changed={}", vendor.join("uws-capi").display());
+    println!("cargo:rerun-if-changed={}", vendor.join("picohttpparser").display());
+    println!("cargo:rerun-if-changed={}", vendor.join("zstd").display());
     println!("cargo:rerun-if-env-changed=BEYOND_QUICKJS_DIR");
 }

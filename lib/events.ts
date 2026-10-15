@@ -344,7 +344,7 @@ function invoke(target: EventTarget, event: Event, list: Listener[], snapshot: L
 const KEY = Symbol("AbortSignal");
 
 function abortError(): DOMException {
-  return new DOMException("This operation was aborted", "AbortError");
+  return new DOMException("The operation was aborted.", "AbortError");
 }
 
 export class AbortSignal extends EventTarget {

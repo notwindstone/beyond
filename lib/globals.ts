@@ -28,6 +28,7 @@ import {
   WritableStreamDefaultController,
   WritableStreamDefaultWriter,
 } from "./streams.ts";
+import { fetch } from "./client.ts";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "./timers.ts";
 import { URL, URLSearchParams } from "./url.ts";
 
@@ -78,5 +79,6 @@ define("TextDecoderStream", TextDecoderStream);
 define("Headers", Headers);
 define("Request", Request);
 define("Response", Response);
+define("fetch", fetch);
 if (g.self === undefined) define("self", globalThis);
 define("Beyond", { serve, inspect, version: "0.1.0" });

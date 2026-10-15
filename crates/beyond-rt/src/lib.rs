@@ -23,6 +23,7 @@ unsafe extern "C" {
     fn uws_get_loop() -> *mut c_void;
     fn us_loop_run_bun_tick(loop_: *mut c_void, timeout: *const Timespec, now_ns: u64);
     fn beyond_loop_num_polls(loop_: *mut c_void) -> c_int;
+    fn beyond_client_idle_count() -> c_int;
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
@@ -157,7 +158,8 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
             }
         }
         // SAFETY: the loop is live.
-        let polls = unsafe { beyond_loop_num_polls(uloop) };
+        // (Idle keep-alive connections of fetch() do not keep it alive.)
+        let polls = unsafe { beyond_loop_num_polls(uloop) - beyond_client_idle_count() };
         let (refd, next) = TIMERS.with_borrow_mut(|t| (t.refd(), t.next().map(|n| n.0)));
         if polls == 0 && !refd {
             return 0;

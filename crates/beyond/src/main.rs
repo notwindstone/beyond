@@ -55,6 +55,7 @@ const GLOBALS: &[(&str, &[&str])] = &[
     ("blob", &["Blob", "File"]),
     ("formdata", &["FormData"]),
     ("fetch", &["Headers", "Request", "Response"]),
+    ("client", &["fetch"]),
     (
         "streams",
         &[
@@ -100,8 +101,8 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
             e.globals.push((name.to_string(), format!("beyond:{spec}")));
         }
     }
-    // (What the Rust standard library, uWebSockets and zlib need.)
-    for l in ["-lstdc++", "-lz", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
+    // (What the Rust standard library, uWebSockets, zlib and Brotli need.)
+    for l in ["-lstdc++", "-lz", "-lbrotlidec", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl"] {
         e.link.push(l.into());
     }
     Ok(())

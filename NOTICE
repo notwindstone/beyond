@@ -19,3 +19,11 @@ web-platform-tests (https://github.com/web-platform-tests/wpt)
 uSockets and uWebSockets, as forked by Bun
   (https://github.com/uNetworking/uSockets, https://github.com/uNetworking/uWebSockets)
   Copyright (c) Alex Hultman and contributors. Apache License 2.0.
+
+picohttpparser (https://github.com/h2o/picohttpparser)
+  Copyright (c) 2009-2014 Kazuho Oku, Tokuhiro Matsuno, Daisuke Murase,
+  Shigeo Mitsunari. MIT License (vendor/picohttpparser).
+
+Zstandard (https://github.com/facebook/zstd)
+  Copyright (c) Meta Platforms, Inc. and affiliates. BSD License
+  (vendor/zstd/LICENSE). Its decoder, as one file (vendor/zstd).

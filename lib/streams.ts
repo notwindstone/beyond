@@ -541,7 +541,7 @@ function setUpDefaultController<R>(
   );
 }
 
-function controllerDesiredSize(c: ReadableStreamDefaultController<any>): number | null {
+export function controllerDesiredSize(c: ReadableStreamDefaultController<any>): number | null {
   const state = c._stream._state;
   if (state === "errored") return null;
   if (state === "closed") return 0;
@@ -558,7 +558,7 @@ function clearAlgorithms(c: ReadableStreamDefaultController<any>): void {
   c._strategySize = undefined;
 }
 
-function controllerClose(c: ReadableStreamDefaultController<any>): void {
+export function controllerClose(c: ReadableStreamDefaultController<any>): void {
   if (!canCloseOrEnqueue(c)) return;
   c._closeRequested = true;
   if (c._queue.length === 0) {
@@ -567,7 +567,7 @@ function controllerClose(c: ReadableStreamDefaultController<any>): void {
   }
 }
 
-function controllerEnqueue<R>(c: ReadableStreamDefaultController<R>, chunk: R): void {
+export function controllerEnqueue<R>(c: ReadableStreamDefaultController<R>, chunk: R): void {
   if (!canCloseOrEnqueue(c)) return;
   const stream = c._stream;
   if (numReadRequests(stream) > 0) {
@@ -590,7 +590,7 @@ function controllerEnqueue<R>(c: ReadableStreamDefaultController<R>, chunk: R): 
   callPullIfNeeded(c);
 }
 
-function controllerError(c: ReadableStreamDefaultController<any>, e: any): void {
+export function controllerError(c: ReadableStreamDefaultController<any>, e: any): void {
   const stream = c._stream;
   if (stream._state !== "readable") return;
   resetQueue(c);

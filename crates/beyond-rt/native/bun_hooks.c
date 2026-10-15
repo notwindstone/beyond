@@ -208,12 +208,17 @@ int Bun__addrinfo_get(struct us_loop_t *loop, const char *host, uint16_t port, s
         }
     }
     *ptr = req;
-    // (Resolved: the caller reads the result now.)
-    return 1;
+    // (Resolved: the caller reads the result now; 0 as for Bun's cache.)
+    return 0;
 }
 
+void us_internal_dns_callback_threadsafe(struct us_connecting_socket_t *c, void *addrinfo_req);
+
+// A connecting socket waiting on a request that is already resolved: its
+// connect continues in the loop's next iteration (as Bun's does then), the
+// loop woken so that it does not wait first.
 int Bun__addrinfo_set(struct addrinfo_request *ptr, struct us_connecting_socket_t *socket) {
-    (void)ptr, (void)socket;
+    us_internal_dns_callback_threadsafe(socket, ptr);
     return 0;
 }
 

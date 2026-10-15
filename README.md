@@ -41,7 +41,8 @@ target/release/beyond run app.ts
 ```
 
 `beyond build app.ts -o app` writes the executable. Needs clang (Bun's
-networking code uses its extensions) and zlib.
+networking code uses its extensions), zlib and brotli's decoder
+(libbrotlidec).
 
 ## Status
 
@@ -60,6 +61,15 @@ networking code uses its extensions) and zlib.
   the connection has room (uWebSockets' writable callbacks, as Bun's sink
   does); a stream that fails midway closes the connection. `server.port`,
   `server.url`, `server.stop()`.
+- `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
+  picohttpparser), keep-alive connections pooled per host, bodies decoded
+  (gzip, deflate, br, zstd), redirects followed (`redirect: "follow"`,
+  `"manual"`, `"error"`; 303, and 301/302 of a POST, as a GET), and an
+  `AbortSignal` aborting the request or the body being read. The response's
+  body is read as it arrives: it is buffered while nothing reads it, and the
+  connection is paused while more than 1 MB is waiting. Its errors are
+  Bun's (`ConnectionRefused`, `ENOTFOUND`, `UnexpectedRedirect`, ...), with
+  their codes. Request bodies are sent whole (a stream is read first).
 - `Blob`, `File` and `FormData`; bodies of them, of strings, bytes and
   `URLSearchParams` (multipart/form-data written and read, urlencoded
   read: `formData()`, `blob()`), with their content types as Bun gives them.
@@ -108,10 +118,12 @@ networking code uses its extensions) and zlib.
   QuickJS-NG, `queueMicrotask`, `atob`, `btoa`, `DOMException`.
 
 The tests (`cargo test`) run programs whose output must be Bun's, the WPT
-URL data and streams tests, and a server answering over TCP.
+URL data and streams tests, a server answering over TCP, and `fetch()`
+against a server of the test's own.
 
-Not yet: TLS, HTTP/2, WebSockets, `fetch` (the client), `crypto.subtle`,
-request bodies as they arrive (they are read whole first), TextDecoder's
+Not yet: TLS (so `fetch` of `https:` URLs), HTTP/2, WebSockets,
+`crypto.subtle`, request bodies as they arrive (on the server, and sent by
+`fetch`: they are read whole first), TextDecoder's
 legacy encodings but windows-1252; errors print without Bun's source
 excerpt, and their stacks' lines are the bundle's.
 

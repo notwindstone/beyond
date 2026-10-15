@@ -22,6 +22,9 @@ static JSContext *ctx;
 static JSValue on_timer;
 
 void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+void beyond_client_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+extern const JSCFunctionListEntry beyond_client_functions[];
+extern const int beyond_client_function_count;
 extern const JSCFunctionListEntry beyond_server_functions[];
 extern const int beyond_server_function_count;
 extern const JSCFunctionListEntry beyond_web_functions[];
@@ -38,6 +41,7 @@ static void mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
     for (int i = 0; i < nrejected; i++)
         JS_MarkValue(rt, rejected[i], mark_func);
     beyond_server_mark(rt, mark_func);
+    beyond_client_mark(rt, mark_func);
 }
 
 static void track_rejection(JSContext *c, JSValueConst promise, JSValueConst reason, bool is_handled, void *opaque) {
@@ -176,6 +180,8 @@ static int module_init(JSContext *c, JSModuleDef *m) {
         return -1;
     if (JS_SetModuleExportList(c, m, beyond_web_functions, beyond_web_function_count))
         return -1;
+    if (JS_SetModuleExportList(c, m, beyond_client_functions, beyond_client_function_count))
+        return -1;
     return JS_SetModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
 }
 
@@ -184,6 +190,7 @@ JSModuleDef *js_init_module_beyond(JSContext *c, const char *name) {
     if (m) {
         JS_AddModuleExportList(c, m, functions, sizeof functions / sizeof *functions);
         JS_AddModuleExportList(c, m, beyond_web_functions, beyond_web_function_count);
+        JS_AddModuleExportList(c, m, beyond_client_functions, beyond_client_function_count);
         JS_AddModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
     }
     return m;

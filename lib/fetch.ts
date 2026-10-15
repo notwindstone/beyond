@@ -13,7 +13,17 @@ import { decodeUtf8, encodeUtf8 } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
-import { readableStreamCancel, readAllBytes, ReadableStream, streamOfBytes } from "./streams.ts";
+import {
+  controllerClose,
+  controllerEnqueue,
+  controllerError,
+  createReadableStream,
+  readableStreamCancel,
+  readAllBytes,
+  ReadableStream,
+  ReadableStreamDefaultController,
+  streamOfBytes,
+} from "./streams.ts";
 import { URLSearchParams } from "./url.ts";
 
 export type HeadersInit = Headers | [string, string][] | Record<string, string>;
@@ -287,6 +297,114 @@ function sizeLabel(n: number): string {
   return n === 0 ? "(0 KB)" : `(${n} bytes)`;
 }
 
+// (Read ahead of a consumer: past it, the connection is paused.)
+const INCOMING_LIMIT = 1 << 20;
+
+/**
+ * A body arriving over a connection (fetch()'s responses), as Bun's
+ * (Body.Value.Locked): its chunks kept until it is read whole, and a
+ * stream made only if `body` is read.
+ */
+export class Incoming {
+  chunks: Uint8Array[] = [];
+  size = 0;
+  done = false;
+  failed = false;
+  error: unknown = undefined;
+  paused = false;
+  // Waiting for all of it (`text()` and the like).
+  resolve: ((b: Uint8Array) => void) | null = null;
+  reject: ((e: unknown) => void) | null = null;
+  // Once it is a stream.
+  controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  pause: (paused: boolean) => void;
+  cancel: () => void;
+
+  constructor(pause: (paused: boolean) => void, cancel: () => void) {
+    this.pause = pause;
+    this.cancel = cancel;
+  }
+
+  push(chunk: Uint8Array): void {
+    const c = this.controller;
+    if (c !== null) {
+      controllerEnqueue(c, chunk);
+      const size = c._strategyHWM - c._queueTotalSize;
+      if (size <= 0 && !this.paused) this.setPaused(true);
+      return;
+    }
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    if (this.size > INCOMING_LIMIT && this.resolve === null && !this.paused) this.setPaused(true);
+  }
+
+  end(): void {
+    this.done = true;
+    if (this.controller !== null) controllerClose(this.controller);
+    else if (this.resolve !== null) this.resolve(this.joined());
+  }
+
+  fail(e: unknown): void {
+    this.failed = true;
+    this.error = e;
+    if (this.controller !== null) controllerError(this.controller, e);
+    else if (this.reject !== null) this.reject(e);
+  }
+
+  setPaused(p: boolean): void {
+    this.paused = p;
+    this.pause(p);
+  }
+
+  joined(): Uint8Array {
+    const chunks = this.chunks;
+    this.chunks = [];
+    if (chunks.length === 1) return chunks[0];
+    const all = new Uint8Array(this.size);
+    let at = 0;
+    for (const c of chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    return all;
+  }
+
+  /** All of it, when it has arrived. */
+  all(): Promise<Uint8Array> {
+    if (this.failed) return Promise.reject(this.error);
+    if (this.done) return Promise.resolve(this.joined());
+    if (this.paused) this.setPaused(false);
+    return new Promise<Uint8Array>((resolve, reject) => {
+      this.resolve = resolve;
+      this.reject = reject;
+    });
+  }
+
+  /** The stream of it: what arrived, then what arrives. */
+  stream(): ReadableStream<Uint8Array> {
+    const s = createReadableStream<Uint8Array>(
+      (): undefined => undefined,
+      () => {
+        if (this.paused && !this.done) this.setPaused(false);
+        return Promise.resolve();
+      },
+      () => {
+        if (!this.done && !this.failed) this.cancel();
+        return Promise.resolve();
+      },
+      65536,
+      (chunk: Uint8Array) => chunk.byteLength,
+    );
+    const c = s._controller as ReadableStreamDefaultController<Uint8Array>;
+    this.controller = c;
+    for (const chunk of this.chunks) controllerEnqueue(c, chunk);
+    this.chunks = [];
+    if (this.failed) controllerError(c, this.error);
+    else if (this.done) controllerClose(c);
+    return s;
+  }
+}
+
 /** What `fetch`'s bodies have in common (Body mixin). */
 class Body {
   _body: Stored;
@@ -295,6 +413,8 @@ class Body {
   _stream: ReadableStream<any> | null = null;
   _streamOfBody = false;
   _used = false;
+  // A body arriving (no stream made of it yet).
+  _incoming: Incoming | null = null;
 
   constructor(body: Stored) {
     this._body = body;
@@ -303,6 +423,14 @@ class Body {
   get body(): ReadableStream<Uint8Array> | null {
     let s = this._stream;
     if (s === null) {
+      const incoming = this._incoming;
+      if (incoming !== null) {
+        s = incoming.stream();
+        this._incoming = null;
+        this._stream = s;
+        if (this._used) s._disturbed = true;
+        return s;
+      }
       if (this._body === null && !this._used) return null;
       s = streamOfBytes(this._used ? new Uint8Array(0) : storedBytes(this._body));
       if (this._used) s._disturbed = true;
@@ -324,7 +452,11 @@ class Body {
     if (this.bodyUsed) throw bodyUsedError();
     this._used = true;
     const s = this._stream;
-    if (s === null) return this._body;
+    if (s === null) {
+      const incoming = this._incoming;
+      if (incoming !== null) return incoming.all();
+      return this._body;
+    }
     if (this._streamOfBody) {
       // (Not read: the stored body, the stream done with.)
       readableStreamCancel(s, undefined);
@@ -377,6 +509,8 @@ class Body {
   /** Gives `to` a copy of this body (a stream body is teed). */
   _cloneBodyTo(to: Body): void {
     if (this.bodyUsed) throw bodyUsedError();
+    // (An arriving body: as a stream, teed.)
+    if (this._incoming !== null) this.body;
     to._body = this._body;
     const s = this._stream;
     if (s !== null && !this._streamOfBody) {
@@ -406,6 +540,9 @@ export class Response extends Body {
   // headers have none (as Bun's, not in the headers).
   _contentType: string | null = null;
   _defaultType: string | null = null;
+  // (fetch()'s: the URL it answers, and whether redirects led there.)
+  _url = "";
+  _redirected = false;
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     super(store(body));
@@ -469,11 +606,11 @@ export class Response extends Body {
   }
 
   get url(): string {
-    return "";
+    return this._url;
   }
 
   get redirected(): boolean {
-    return false;
+    return this._redirected;
   }
 
   get ok(): boolean {

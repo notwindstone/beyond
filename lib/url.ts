@@ -857,6 +857,27 @@ function fastPath(input: string, start: number, url: Record): boolean {
   return true;
 }
 
+/** Whether `s[start..end]` is an IPv4 address as it serializes: four decimal parts, 0 to 255, without leading zeros. */
+function canonicalIPv4(s: string, start: number, end: number): boolean {
+  let parts = 0;
+  let i = start;
+  while (i <= end) {
+    let n = 0;
+    let digits = 0;
+    while (i < end && isDigit(s.charCodeAt(i))) {
+      n = n * 10 + (s.charCodeAt(i) - 0x30);
+      digits++;
+      i++;
+    }
+    if (digits === 0 || digits > 3 || n > 255 || (digits > 1 && s.charCodeAt(i - digits) === 0x30)) return false;
+    parts++;
+    if (i === end) break;
+    if (s.charCodeAt(i) !== 0x2e) return false;
+    i++;
+  }
+  return parts === 4;
+}
+
 /**
  * The common URL, parsed without the state machine: printable ASCII that
  * needs no encoding, a special scheme other than file with "//", a host
@@ -922,11 +943,12 @@ function fastParse(input: string, base: Record | null): Record | null {
   }
   const nameEnd = portStart >= 0 ? portStart : hostEnd;
   if (nameEnd === hostStart) return null;
-  // (A last label that starts with a digit may make it an IPv4 address.)
+  // (A last label that starts with a digit may make it an IPv4 address:
+  // only the canonical dotted decimal form is taken as it is.)
   let labelStart = nameEnd - 1;
   if (input.charCodeAt(labelStart) === 0x2e) labelStart--;
   while (labelStart > hostStart && input.charCodeAt(labelStart - 1) !== 0x2e) labelStart--;
-  if (isDigit(input.charCodeAt(labelStart))) return null;
+  if (isDigit(input.charCodeAt(labelStart)) && !canonicalIPv4(input, hostStart, nameEnd)) return null;
   let host = input.slice(hostStart, nameEnd);
   if (upper) host = host.toLowerCase();
   let port: number | null = null;
