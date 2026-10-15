@@ -24,35 +24,38 @@ onTimer((id: number) => {
 });
 
 export class Timeout {
-  #id: number;
+  _id: number;
+  _ref = true;
   constructor(id: number) {
-    this.#id = id;
+    this._id = id;
   }
   /** Keep the program alive while the timer is set (the default). */
   ref(): this {
-    refTimer(this.#id, true);
+    this._ref = true;
+    refTimer(this._id, true);
     return this;
   }
   /** Let the program exit even though the timer is set. */
   unref(): this {
-    refTimer(this.#id, false);
+    this._ref = false;
+    refTimer(this._id, false);
     return this;
   }
   hasRef(): boolean {
-    return entries.has(this.#id);
+    return this._ref;
   }
   /** Start the delay over. */
   refresh(): this {
-    const e = entries.get(this.#id);
-    if (e !== undefined) setTimer(this.#id, e.delay, e.repeat);
+    const e = entries.get(this._id);
+    if (e !== undefined) setTimer(this._id, e.delay, e.repeat);
     return this;
   }
   close(): this {
-    clear(this.#id);
+    clear(this._id);
     return this;
   }
   [Symbol.toPrimitive](): number {
-    return this.#id;
+    return this._id;
   }
 }
 

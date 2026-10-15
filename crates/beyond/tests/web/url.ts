@@ -1,0 +1,33 @@
+const show = (p: URLSearchParams) => JSON.stringify([...p]);
+const p = new URLSearchParams("?a=1&b=2+3&a=%20x&c&=v&d=%zz&e=%C3%A9&&");
+console.log(show(p), p.size, p.toString());
+console.log(p.get("a"), JSON.stringify(p.getAll("a")), p.has("c"), p.has("a", "1"), p.has("a", "9"), p.get("zz"));
+p.append("f", "x y&z=é/~!'()*");
+p.set("a", "new");
+p.delete("b");
+p.delete("a", "nope");
+console.log(p.toString());
+p.sort();
+console.log(p.toString());
+console.log(show(new URLSearchParams({ x: "1", y: "2" })), show(new URLSearchParams([["k", "v"], ["k", "w"]])));
+console.log(show(new URLSearchParams(new URLSearchParams("q=1"))));
+try { new URLSearchParams([["only"]] as any); } catch (e: any) { console.log(e.name); }
+const u = new URL("https://example.com/path?x=1#frag");
+u.searchParams.append("y", "a b");
+console.log(u.href, u.search);
+u.search = "?z=9";
+console.log(u.searchParams.get("z"), u.searchParams.get("x"));
+u.searchParams.delete("z");
+console.log(u.href);
+u.href = "http://user:pa%3Ass@[::1]:8080/a/../b/./c?q#h";
+console.log(u.href, u.origin, u.host, u.hostname, u.port, u.username, u.password, u.pathname, u.searchParams.get("q"));
+const keys: string[] = [];
+const it = new URLSearchParams("a=1&b=2&c=3");
+it.forEach((v, k, self) => { keys.push(k + v); if (k === "a") self.delete("b"); });
+console.log(keys.join());
+console.log(URL.canParse("nope"), URL.canParse("/x", "https://a.b"), URL.parse("bad"), String(URL.parse("/p?q", "http://h")));
+console.log(JSON.stringify({ u: new URL("http://a/b") }), new URL("http://a/b").toString());
+console.log(new URL("file:///C:/x/../y").href, new URL("blob:https://a.b:8/x").origin, new URL("data:text/plain,hi").origin);
+console.log(new URL("http://EXAMPLE.com:80/%7e?%7e#%7e").href, new URL("http://0x7f.1/").host, new URL("http://[0:0::1:0:0]/").host);
+console.log(new URL("http://ü.example/ä?ö#ü").href);
+try { new URL("http://a:99999"); } catch (e: any) { console.log(e.name, e.code); }

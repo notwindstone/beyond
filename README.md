@@ -1,6 +1,6 @@
 # Beyond
 
-A JavaScript and TypeScript runtime built on [Luminous](https://github.com/notwindstone/typescript-aot),
+A JavaScript and TypeScript runtime built on [Luminous](https://github.com/notwindstone/luminous),
 the ahead-of-time TypeScript compiler: a program and the runtime's own APIs are
 compiled together into one native executable.
 
@@ -62,8 +62,30 @@ networking code uses its extensions) and zlib.
   on a request's path is native. A response's headers are made only when the
   program reads them; most responses only send a content type.
 
+- `URL` and `URLSearchParams`: the URL standard's parser (a state machine,
+  with a fast path for the common URL), hosts with IPv4, IPv6 and
+  internationalized domains (punycode, and UTS #46's mapping approximated
+  with NFKC, lower case and the Unicode categories), all the setters. It
+  passes all of the web platform tests' URL data (urltestdata 896/896,
+  setters 278/278, toascii 87/87; Bun: 881, 274 and 80) and 2626 of the
+  2634 IdnaTestV2 cases (Bun: 1867).
+- `TextEncoder` and `TextDecoder`: UTF-8 (native: Rust's validation and its
+  lossy decoding, which is the standard's), UTF-16LE/BE and windows-1252
+  (the standard's `latin1` and `ascii`), `fatal`, `ignoreBOM` and streaming.
+- `Event`, `CustomEvent`, `EventTarget` (capture, `once`, `passive`,
+  `signal`, `handleEvent` objects), `AbortController` and `AbortSignal`
+  (`abort`, `timeout`, `any`, `onabort`), `reportError` (as Bun's: the error
+  is printed and the program exits with 1 after the current task).
+- `crypto.getRandomValues` and `crypto.randomUUID` (from the kernel, through
+  a buffer), `structuredClone` (with `transfer`), `self`; and from
+  QuickJS-NG, `queueMicrotask`, `atob`, `btoa`, `DOMException`.
+
+The tests (`cargo test`) run programs whose output must be Bun's, the WPT
+URL data, and a server answering over TCP.
+
 Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Blob` and `FormData`,
-`fetch` (the client), and the other globals of the plan.
+`fetch` (the client), `crypto.subtle`, and `console.log` formats arrays and
+objects as QuickJS-NG does, not as Bun.
 
 ## Performance
 
@@ -73,12 +95,12 @@ Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Blob` and `FormData`,
 
 | | requests/s | p99 latency | peak memory |
 |---|---|---|---|
-| Beyond, text | 60,636 | 1.92 ms | 14.3 MB |
-| Bun, text | 61,342 | 2.29 ms | 26.0 MB |
-| Beyond, JSON | 58,684 | 1.96 ms | 14.7 MB |
-| Bun, JSON | 59,780 | 2.20 ms | 27.2 MB |
+| Beyond, text | 68,038 | 1.71 ms | 16.0 MB |
+| Bun, text | 68,210 | 1.90 ms | 27.2 MB |
+| Beyond, JSON | 65,326 | 1.73 ms | 16.4 MB |
+| Bun, JSON | 62,324 | 2.08 ms | 28.3 MB |
 
-Throughput is level with Bun's here (the load generator shares the cores),
-in about half the memory. Before the request path compiled to native code
+Throughput is level with Bun's for text and ahead for JSON (the load
+generator shares the cores), in about 60% of the memory. Before the request path compiled to native code
 (with `#private` fields and regular expressions in `Headers`), Beyond
 answered 37,661 text and 25,350 JSON requests a second.

@@ -2,6 +2,9 @@
 //! timers. As Bun's, the loop waits on uSockets' (epoll) until the next
 //! timer is due, and timers live here rather than in the kernel; between
 //! callbacks into JavaScript, the jobs they queued (promise reactions) run.
+//! Also the parts of the web APIs that are best native (`encoding`).
+
+mod encoding;
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
@@ -22,6 +25,7 @@ unsafe extern "C" {
     fn beyond_loop_num_polls(loop_: *mut c_void) -> c_int;
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
+    fn beyond_js_uncaught() -> c_int;
 }
 
 /// Nanoseconds since the program started.
@@ -113,14 +117,14 @@ pub extern "C" fn beyond_rt_now_ms() -> f64 {
 
 /// Runs the program's event loop until nothing keeps it alive (no timer
 /// that is referenced, no socket): 0, or nonzero when a callback threw (the
-/// exception is pending).
+/// exception is pending) or reportError reported an error.
 #[unsafe(no_mangle)]
 pub extern "C" fn beyond_rt_loop() -> c_int {
     // SAFETY: uWebSockets' loop of this thread, created on first use.
     let uloop = unsafe { uws_get_loop() };
     loop {
         // SAFETY: the context was set up by beyond_init.
-        if unsafe { beyond_js_run_jobs() } < 0 {
+        if unsafe { beyond_js_run_jobs() } < 0 || unsafe { beyond_js_uncaught() } != 0 {
             return 1;
         }
         // The timers that are due, in order (a callback may set or clear
@@ -147,7 +151,7 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
             });
             let Some(id) = due else { break };
             // SAFETY: as above.
-            if unsafe { beyond_js_fire_timer(id) } < 0 {
+            if unsafe { beyond_js_fire_timer(id) } < 0 || unsafe { beyond_js_uncaught() } != 0 {
                 return 1;
             }
         }

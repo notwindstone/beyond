@@ -1,0 +1,35 @@
+utf-8 61 ef bf bd 62 e2 82 ac f0 9f 98 80 0 [object TextEncoder]
+{"read":2,"written":2} 61 62 00 00 00
+{"read":1,"written":2}
+utf-8 false false
+61 fffd 62
+fffd
+fffd fffd fffd 61
+fffd 41
+41
+
+feff 41
+TypeError
+68 e9 1f600 21
+7c fffd
+windows-1252 41 20ac 178 e9
+utf-16le 41 1f600 fffd
+68 69 68 69
+RangeError
+16 true true
+TypeMismatchError
+true true 0 2 true /x/gi [1,2] null
+true bad
+DataCloneError
+0 4
+{"x":1}
+false true 0 true
+c,a2,btrue,c,btrue
+1 true 2 2
+after the error
+subclass q
+true AbortError onabort,listener
+thrown AbortError
+why
+true first
+TypeError

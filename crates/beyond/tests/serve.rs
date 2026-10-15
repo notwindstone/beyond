@@ -1,9 +1,10 @@
 //! `Beyond.serve`: builds tests/serve/app.ts, runs it, and checks its
 //! answers to requests made over TCP.
 
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -32,20 +33,9 @@ fn get(port: u16, path: &str) -> (Vec<String>, String) {
 
 #[test]
 fn serve() {
-    let dir = std::env::temp_dir().join(format!("beyond-serve-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    // The native core (a static library, which `cargo test` does not build),
-    // next to `beyond`.
-    let mut cargo = Command::new(env!("CARGO"));
-    cargo.args(["build", "-p", "beyond-rt"]);
-    if !cfg!(debug_assertions) {
-        cargo.arg("--release");
-    }
-    assert!(cargo.status().unwrap().success(), "building beyond-rt failed");
+    let dir = common::tempdir("serve");
     let exe = dir.join("app");
-    let app = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/serve/app.ts");
-    let st = Command::new(env!("CARGO_BIN_EXE_beyond")).arg("build").arg(&app).arg("-o").arg(&exe).status().unwrap();
-    assert!(st.success(), "beyond build failed");
+    common::build(&common::test_file("serve/app.ts"), &exe);
 
     let mut child = Command::new(&exe).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let mut line = String::new();

@@ -238,7 +238,7 @@ class Body {
   async arrayBuffer(): Promise<ArrayBuffer> {
     const b = this._take();
     if (b === null) return new ArrayBuffer(0);
-    return typeof b === "string" ? encodeUtf8(b) : b.slice(0);
+    return typeof b === "string" ? (encodeUtf8(b).buffer as ArrayBuffer) : b.slice(0);
   }
 
   async bytes(): Promise<Uint8Array> {

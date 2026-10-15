@@ -1,4 +1,4 @@
 [submodule "vendor/luminous"]
 	path = vendor/luminous
-	url = https://github.com/notwindstone/typescript-aot
+	url = https://github.com/notwindstone/luminous
 	branch = claude/gifted-fermi-50d9na

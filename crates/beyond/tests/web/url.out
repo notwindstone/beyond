@@ -1,0 +1,18 @@
+[["a","1"],["b","2 3"],["a"," x"],["c",""],["","v"],["d","%zz"],["e","é"]] 7 a=1&b=2+3&a=+x&c=&=v&d=%25zz&e=%C3%A9
+1 ["1"," x"] true true false null
+a=new&c=&=v&d=%25zz&e=%C3%A9&f=x+y%26z%3D%C3%A9%2F%7E%21%27%28%29*
+=v&a=new&c=&d=%25zz&e=%C3%A9&f=x+y%26z%3D%C3%A9%2F%7E%21%27%28%29*
+[["x","1"],["y","2"]] [["k","v"],["k","w"]]
+[["q","1"]]
+TypeError
+https://example.com/path?x=1&y=a+b#frag ?x=1&y=a+b
+9 null
+https://example.com/path#frag
+http://user:pa%3Ass@[::1]:8080/b/c?q#h http://[::1]:8080 [::1]:8080 [::1] 8080 user pa%3Ass /b/c 
+a1,c3
+false true null http://h/p?q
+{"u":"http://a/b"} http://a/b
+file:///C:/y https://a.b:8 null
+http://example.com/%7e?%7e#%7e 127.0.0.1 [::1:0:0]
+http://xn--tda.example/%C3%A4?%C3%B6#%C3%BC
+TypeError ERR_INVALID_URL
