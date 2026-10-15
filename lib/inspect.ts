@@ -105,6 +105,10 @@ function double(n: number): string {
 function objectName(o: object): string | null {
   const proto = Object.getPrototypeOf(o);
   if (proto === null) return "[Object: null prototype]";
+  if (proto === Object.prototype) {
+    const tag = (o as any)[Symbol.toStringTag];
+    if (typeof tag === "string" && tag !== "") return tag;
+  }
   const ctor = proto.constructor;
   let name = typeof ctor === "function" ? ctor.name : "";
   if (typeof name !== "string" || name === "") {
@@ -129,6 +133,11 @@ export class Formatter {
 
   write(s: string): void {
     this.out += s;
+  }
+
+  /** Whether a value printed now is past the depth (shown as `[Name ...]`). */
+  tooDeep(): boolean {
+    return this.depth > this.maxDepth;
   }
 
   add(n: number): void {
@@ -261,6 +270,8 @@ export class Formatter {
       }
       case T_BOXED: {
         const o = v as any;
+        // (A String inside a value is shown as its string, as Bun's.)
+        if (o instanceof String && this.quoteStrings) return this.string(String(o));
         const name = o instanceof Number ? "Number" : o instanceof String ? "String" : "Boolean";
         const inner = name === "String" ? JSON.stringify(String(o)) : name === "Number" ? double(Number(o)) : String(o.valueOf());
         const s = `[${name}: ${inner}]`;
@@ -344,6 +355,12 @@ export class Formatter {
       this.add(2);
       return;
     }
+    // (As Bun 1.4.3's: past the depth, as objects are.)
+    if (this.depth > this.maxDepth) {
+      this.write("[Array ...]");
+      this.add(11);
+      return;
+    }
     // (Heuristic: more than 10, probably should have a newline before it.)
     let wasGoodTime = len > 10;
     const prevQuote = this.quoteStrings;
@@ -355,7 +372,9 @@ export class Formatter {
     {
       const has = 0 in a;
       const tag = has ? tagOf(a[0]) : T_UNDEFINED;
-      wasGoodTime = wasGoodTime || (has && !isPrimitive(tag)) || this.goodTimeForNewLine();
+      // (A String object is shown as its string.)
+      const primitive = isPrimitive(tag) || (tag === T_BOXED && a[0] instanceof String);
+      wasGoodTime = wasGoodTime || (has && !primitive) || this.goodTimeForNewLine();
       if (!this.singleLine && wasGoodTime) {
         this.resetLine();
         this.write("[\n");
@@ -484,12 +503,18 @@ export class Formatter {
         this.writeIndent();
         this.resetLine();
       }
-      this.write(`[${objectName(o) ?? "Object"} ...]`);
+      // (A class's instance too: Bun names only those with a tag.)
+      const tag = (o as any)[Symbol.toStringTag];
+      this.write(`[${typeof tag === "string" && tag !== "" ? tag : "Object"} ...]`);
       this.quoteStrings = prevQuote;
       return;
     }
+    // (A plain object named by its tag does not show it, but alone.)
+    const keys = Reflect.ownKeys(o);
+    const hideTag = keys.length > 1 && typeof (o as any)[Symbol.toStringTag] === "string";
     let i = 0;
-    for (const k of Reflect.ownKeys(o)) {
+    for (const k of keys) {
+      if (hideTag && k === Symbol.toStringTag) continue;
       const d = Object.getOwnPropertyDescriptor(o, k);
       if (d === undefined || !d.enumerable) continue;
       if (i === 0) {
@@ -549,14 +574,19 @@ export class Formatter {
    * given (quoted with `quoteKeys`), then `tail` on a line of its own;
    * `{}` when there is neither.
    */
-  record(name: string, entries: [string, unknown][], options?: { quoteKeys?: boolean; tail?: string; lastComma?: boolean }): void {
+  record(
+    name: string,
+    entries: [string, unknown][],
+    options?: { quoteKeys?: boolean; tail?: string; lastComma?: boolean; full?: boolean },
+  ): void {
     const tail = options?.tail;
-    if (entries.length === 0 && tail === undefined) {
-      this.write(`${name} {}`);
+    // (`full`: shown whole at any depth, as Bun's Blob, Request, Response.)
+    if (this.depth > this.maxDepth && options?.full !== true) {
+      this.write(`[${name} ...]`);
       return;
     }
-    if (this.depth > this.maxDepth) {
-      this.write(`[${name} ...]`);
+    if (entries.length === 0 && tail === undefined) {
+      this.write(`${name} {}`);
       return;
     }
     const prevQuote = this.quoteStrings;

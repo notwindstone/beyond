@@ -7,7 +7,7 @@ const show = async (label: string, f: () => any) => {
   try {
     console.log(label, await f());
   } catch (e: any) {
-    console.log(label, "threw", e?.constructor?.name, JSON.stringify(strip(e?.message ?? null)), e?.code, e?.name, e?.errno, strip(e?.path ?? null));
+    console.log(label, "threw", e?.constructor?.name, JSON.stringify(strip(e?.message ?? null)), e?.code, e?.name, e?.errno, strip(e?.path ?? null), e?.syscall, e?.hostname);
   }
 };
 
@@ -122,6 +122,9 @@ await show("server closed", async () => [await (await fetch(B + "/bye")).text(),
 
 // Errors.
 await show("refused", () => fetch("http://127.0.0.1:1/"));
+await show("reset", () => fetch(B + "/reset"));
+await show("garbage", () => fetch(B + "/garbage"));
+await show("dns", () => fetch("http://nonexistent.invalid/"));
 await show("bad url", () => fetch("not a url"));
 await show("ftp", () => fetch("ftp://x/"));
 await show("aborted", () => fetch(B + "/", { signal: AbortSignal.abort() }));

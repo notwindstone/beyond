@@ -141,6 +141,9 @@ static const char *const common[] = {
     "upgrade-insecure-requests", "if-none-match", "if-modified-since", "x-forwarded-for", "x-forwarded-proto",
     "x-real-ip", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-user", "sec-ch-ua",
     "sec-ch-ua-mobile", "sec-ch-ua-platform", "dnt", "te", "transfer-encoding", "priority",
+    // (And a response's, for fetch().)
+    "date", "server", "content-encoding", "vary", "etag", "last-modified", "location", "set-cookie",
+    "keep-alive", "expires", "access-control-allow-origin", "x-powered-by", "OK",
 };
 #define NCOMMON (sizeof common / sizeof *common)
 static JSValue common_values[NCOMMON];
@@ -160,12 +163,34 @@ void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
 
 // ---- Handing a request to JavaScript ----
 
-static JSValue common_string(JSContext *ctx, const char *p, size_t n) {
-    for (size_t i = 0; i < NCOMMON; i++) {
+// The common strings by a hash of their length and ends: index + 1, open
+// addressing (0: none).
+#define COMMON_SLOTS 256
+static uint8_t common_index[COMMON_SLOTS];
+
+static unsigned common_hash(const char *p, size_t n) {
+    return ((unsigned)n * 31u + (unsigned char)p[0] * 7u + (unsigned char)p[n - 1] * 3u) & (COMMON_SLOTS - 1);
+}
+
+JSValue beyond_common_string(JSContext *ctx, const char *p, size_t n) {
+    if (n == 0)
+        return JS_NewStringLen(ctx, p, n);
+    if (!common_lens[0]) {
+        for (size_t i = 0; i < NCOMMON; i++) {
+            common_lens[i] = (uint8_t)strlen(common[i]);
+            common_values[i] = JS_UNDEFINED;
+            unsigned h = common_hash(common[i], common_lens[i]);
+            while (common_index[h])
+                h = (h + 1) & (COMMON_SLOTS - 1);
+            common_index[h] = (uint8_t)(i + 1);
+        }
+    }
+    for (unsigned h = common_hash(p, n); common_index[h]; h = (h + 1) & (COMMON_SLOTS - 1)) {
+        size_t i = common_index[h] - 1;
         if (common_lens[i] == n && !memcmp(common[i], p, n)) {
             if (JS_IsUndefined(common_values[i]))
                 common_values[i] = JS_NewStringLen(ctx, p, n);
-            return JS_DupValue(ctx, common_values[i]);
+            return common_values[i];
         }
     }
     return JS_NewStringLen(ctx, p, n);
@@ -196,7 +221,7 @@ static void add_header(void *user, const char *k, size_t kl, const char *v, size
         h->host = v;
         h->host_len = vl;
     }
-    h->values[h->n++] = common_string(h->ctx, k, kl);
+    h->values[h->n++] = beyond_common_string(h->ctx, k, kl);
     h->values[h->n++] = JS_NewStringLen(h->ctx, v, vl);
 }
 
@@ -267,7 +292,7 @@ static void on_request(uws_res_t *res, uws_req_t *req, void *user) {
     s->server = user;
     const char *p;
     size_t n = beyond_req_method(req, &p);
-    s->args[0] = common_string(ctx, p, n);
+    s->args[0] = beyond_common_string(ctx, p, n);
     HeaderSink h;
     h.ctx = ctx;
     h.n = 0;
@@ -402,11 +427,22 @@ static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, cons
         *owned = JS_ToCStringLen(ctx, len, v);
         return (const uint8_t *)*owned;
     }
-    size_t off = 0, bpe;
-    uint8_t *b = JS_GetArrayBuffer(ctx, len, v);
-    if (b)
+    // (Checked before asking: asking for the wrong kind throws, and making
+    // an error is costly.)
+    if (JS_IsArrayBuffer(v))
+        return JS_GetArrayBuffer(ctx, len, v);
+    int type = JS_GetTypedArrayType(v);
+    if (type < 0) {
+        *len = 0;
+        return NULL;
+    }
+    if (type == JS_TYPED_ARRAY_UINT8 || type == JS_TYPED_ARRAY_UINT8C) {
+        uint8_t *b = JS_GetUint8Array(ctx, len, v);
+        if (!b)
+            JS_FreeValue(ctx, JS_GetException(ctx));
         return b;
-    JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    size_t off = 0, bpe;
     JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, len, &bpe);
     if (JS_IsException(ab)) {
         JS_FreeValue(ctx, JS_GetException(ctx));
@@ -414,7 +450,7 @@ static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, cons
         return NULL;
     }
     size_t total;
-    b = JS_GetArrayBuffer(ctx, &total, ab);
+    uint8_t *b = JS_GetArrayBuffer(ctx, &total, ab);
     JS_FreeValue(ctx, ab);
     return b ? b + off : NULL;
 }
@@ -617,12 +653,6 @@ static void on_listen(struct us_listen_socket_t *ls, void *user) {
 // listen(hostname, port, handler): the server's index, or -1.
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t port;
-    if (!common_lens[0]) {
-        for (size_t i = 0; i < NCOMMON; i++) {
-            common_lens[i] = (uint8_t)strlen(common[i]);
-            common_values[i] = JS_UNDEFINED;
-        }
-    }
     if (JS_ToInt32(ctx, &port, argv[1]))
         return JS_EXCEPTION;
     if (nservers == MAX_SERVERS)

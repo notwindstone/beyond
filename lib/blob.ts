@@ -11,13 +11,36 @@ export interface BlobPropertyBag {
   endings?: "transparent" | "native";
 }
 
-/** A type as Blob keeps it: lower case, or empty if not printable ASCII. */
+/**
+ * A type as Blob keeps it: lower case (empty if not printable ASCII), and
+ * the few that Bun's MIME table has a canonical form of in that form
+ * (MimeType.rs: `by_name_static`).
+ */
 function normalizeType(t: string | undefined): string {
   if (t === undefined) return "";
   const s = String(t);
   for (let i = 0; i < s.length; i++) {
     const c = s.charCodeAt(i);
     if (c < 0x20 || c > 0x7e) return "";
+  }
+  // (The table's names match as they are; the rest is lower case.)
+  switch (s) {
+    case "text/plain":
+      return "text/plain;charset=utf-8";
+    case "text/html":
+      return "text/html;charset=utf-8";
+    case "text/css":
+      return "text/css;charset=utf-8";
+    case "application/javascript":
+    case "text/javascript":
+    case "text/jsx":
+      return "text/javascript;charset=utf-8";
+    case "application/json":
+      return "application/json;charset=utf-8";
+    case "application/x-www-form-urlencoded":
+      return "application/x-www-form-urlencoded;charset=UTF-8";
+    case "application/webassembly":
+      return "application/wasm";
   }
   return s.toLowerCase();
 }
@@ -119,7 +142,7 @@ export class Blob {
   [describe](f: Formatter): void {
     const size = this.size === 0 ? "0 KB" : `${this.size} bytes`;
     if (this._type === "") f.write(`Blob (${size})`);
-    else f.record(`Blob (${size})`, [["type", this._type]], { lastComma: false });
+    else f.record(`Blob (${size})`, [["type", this._type]], { lastComma: false, full: true });
   }
 }
 
@@ -135,8 +158,6 @@ export class File extends Blob {
 
   constructor(parts: Iterable<BlobPart>, name: string, options?: FilePropertyBag) {
     super(parts, options);
-    // (As Bun's: a text type without a charset is UTF-8.)
-    if (this._type.startsWith("text/") && !this._type.includes("charset")) this._type += ";charset=utf-8";
     this._name = String(name);
     this._lastModified = options?.lastModified !== undefined ? Number(options.lastModified) : Date.now();
   }
@@ -161,7 +182,7 @@ export class File extends Blob {
     const entries: [string, unknown][] = [["name", this._name]];
     if (this._type !== "") entries.push(["type", this._type]);
     if (this._showModified) entries.push(["lastModified", this._lastModified]);
-    f.record(`File (${this.size === 0 ? "0 KB" : `${this.size} bytes`})`, entries, { lastComma: false });
+    f.record(`File (${this.size === 0 ? "0 KB" : `${this.size} bytes`})`, entries, { lastComma: false, full: true });
   }
 }
 

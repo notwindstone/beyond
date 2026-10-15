@@ -19,7 +19,7 @@ undefined
 --- sym
 Symbol(s)
 --- arr
-[ 1, "two", null, undefined, [ 3, [ 4, [ 5, [ 6 ] ] ] ] ]
+[ 1, "two", null, undefined, [ 3, [ 4, [Array ...] ] ] ]
 --- empty arr
 []
 --- sparse

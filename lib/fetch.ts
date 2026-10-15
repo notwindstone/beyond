@@ -9,7 +9,7 @@
 // classes' constructors and methods to native code, the hot path of every
 // request the server answers.
 
-import { decodeUtf8, encodeUtf8 } from "beyond:native";
+import { decodeUtf8, encodeUtf8, promiseNew, promiseSettle } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
@@ -22,6 +22,7 @@ import {
   readAllBytes,
   ReadableStream,
   ReadableStreamDefaultController,
+  ReadableStreamDefaultReader,
   streamOfBytes,
 } from "./streams.ts";
 import { URLSearchParams } from "./url.ts";
@@ -82,6 +83,38 @@ function normalizeValue(value: string): string {
   return v;
 }
 
+// The names WebKit's header map knows (HTTPHeaderNames.in, but set-cookie):
+// Bun's Headers show them first, then set-cookie, then the others, each in
+// the order it was first added.
+const COMMON_NAMES = new Set<string>([
+  "accept", "accept-charset", "accept-language", "accept-encoding", "accept-ranges",
+  "access-control-allow-credentials", "access-control-allow-headers",
+  "access-control-allow-methods", "access-control-allow-origin", "access-control-expose-headers",
+  "access-control-max-age", "access-control-request-headers", "access-control-request-method",
+  "age", "authorization", "cache-control", "connection", "content-disposition", "content-encoding",
+  "content-language", "content-length", "content-location", "content-security-policy",
+  "content-security-policy-report-only", "content-type", "content-range", "cookie", "cookie2",
+  "cross-origin-embedder-policy", "cross-origin-embedder-policy-report-only",
+  "cross-origin-opener-policy", "cross-origin-opener-policy-report-only",
+  "cross-origin-resource-policy", "date", "dnt", "default-style", "etag", "expect", "expires",
+  "host", "if-match", "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
+  "keep-alive", "last-event-id", "last-modified", "link", "location", "origin", "ping-from",
+  "ping-to", "purpose", "pragma", "proxy-authorization", "proxy-connection", "range", "referer",
+  "referrer-policy", "refresh", "report-to", "sec-fetch-dest", "sec-fetch-mode",
+  "sec-websocket-accept", "sec-websocket-extensions", "sec-websocket-key",
+  "sec-websocket-protocol", "sec-websocket-version", "server-timing", "service-worker",
+  "service-worker-allowed", "service-worker-navigation-preload", "set-cookie2", "sourcemap", "te",
+  "timing-allow-origin", "trailer", "transfer-encoding", "upgrade", "upgrade-insecure-requests",
+  "user-agent", "vary", "via", "x-content-type-options", "x-dns-prefetch-control",
+  "x-frame-options", "x-sourcemap", "x-xss-protection", "x-temp-tablet", "icy-metaint",
+  "icy-metadata",
+]);
+
+/** How the values of a header name are combined (cookies: "; "). */
+function combine(name: string, a: string, b: string): string {
+  return name === "cookie" ? `${a}; ${b}` : `${a}, ${b}`;
+}
+
 export class Headers {
   // Lower-case names and their values, in the order they were added.
   _names: string[] = [];
@@ -139,7 +172,7 @@ export class Headers {
     const n = checkName(name);
     let out: string | null = null;
     for (let i = 0; i < this._names.length; i++) {
-      if (this._names[i] === n) out = out === null ? this._values[i] : `${out}, ${this._values[i]}`;
+      if (this._names[i] === n) out = out === null ? this._values[i] : combine(n, out, this._values[i]);
     }
     return out;
   }
@@ -176,16 +209,33 @@ export class Headers {
     return this._names.length;
   }
 
+  /**
+   * [name, value, ...] in order of name, the values of a name combined (but
+   * `set-cookie`'s).
+   */
+  _sorted(): string[] {
+    const names = this._names;
+    const values = this._values;
+    const out: string[] = [];
+    if (names.length === 0) return out;
+    const unique = names.length === 1 ? names.slice() : [...new Set(names)].sort();
+    for (let u = 0; u < unique.length; u++) {
+      const n = unique[u];
+      let combined: string | null = null;
+      for (let i = 0; i < names.length; i++) {
+        if (names[i] !== n) continue;
+        if (n === "set-cookie") out.push(n, values[i]);
+        else combined = combined === null ? values[i] : combine(n, combined, values[i]);
+      }
+      if (combined !== null) out.push(n, combined);
+    }
+    return out;
+  }
+
   /** In order of name, values of a name combined (but `set-cookie`'s). */
   *entries(): IterableIterator<[string, string]> {
-    const names = [...new Set(this._names)].sort();
-    for (const n of names) {
-      if (n === "set-cookie") {
-        for (const v of this.getSetCookie()) yield [n, v];
-      } else {
-        yield [n, this.get(n) as string];
-      }
-    }
+    const flat = this._sorted();
+    for (let i = 0; i < flat.length; i += 2) yield [flat[i], flat[i + 1]];
   }
 
   *keys(): IterableIterator<string> {
@@ -204,9 +254,43 @@ export class Headers {
     return this.entries();
   }
 
-  toJSON(): Record<string, string> {
-    const out: Record<string, string> = {};
-    for (const [k, v] of this.entries()) out[k] = v;
+  /**
+   * The headers as Bun shows them (toJSON, console.log): the names its
+   * header map knows, set-cookie's values, then the others, each name where
+   * it was first added, its values combined.
+   */
+  _shown(): [string, string | string[]][] {
+    const names = this._names;
+    const values = this._values;
+    const common: [string, string][] = [];
+    const other: [string, string][] = [];
+    const cookies: string[] = [];
+    for (let i = 0; i < names.length; i++) {
+      const n = names[i];
+      if (n === "set-cookie") {
+        cookies.push(values[i]);
+        continue;
+      }
+      const list = COMMON_NAMES.has(n) ? common : other;
+      let found = false;
+      for (let k = 0; k < list.length; k++) {
+        if (list[k][0] === n) {
+          list[k][1] = combine(n, list[k][1], values[i]);
+          found = true;
+          break;
+        }
+      }
+      if (!found) list.push([n, values[i]]);
+    }
+    const out: [string, string | string[]][] = common;
+    if (cookies.length > 0) out.push(["set-cookie", cookies]);
+    for (let k = 0; k < other.length; k++) out.push(other[k]);
+    return out;
+  }
+
+  toJSON(): Record<string, string | string[]> {
+    const out: Record<string, string | string[]> = {};
+    for (const [k, v] of this._shown()) out[k] = v;
     return out;
   }
 
@@ -215,7 +299,9 @@ export class Headers {
   }
 
   [describe](f: Formatter): void {
-    f.record("Headers", [...this.entries()], { quoteKeys: true });
+    // (Bun shows its toJSON object: past the depth, `[Object ...]`.)
+    if (f.tooDeep()) f.write("Headers [Object ...]");
+    else f.record("Headers", this._shown(), { quoteKeys: true });
   }
 }
 
@@ -286,6 +372,31 @@ function storedBytes(b: Stored): Uint8Array {
   return typeof b === "string" ? encodeUtf8(b) : new Uint8Array(b);
 }
 
+/** A promise fulfilled with `v` (made settled: no resolving functions). */
+function resolved<T>(v: T): Promise<T> {
+  const p = promiseNew() as Promise<T>;
+  promiseSettle(p, v, false);
+  return p;
+}
+
+/** A promise rejected with `e`. */
+function rejected<T>(e: unknown): Promise<T> {
+  const p = promiseNew() as Promise<T>;
+  promiseSettle(p, e, true);
+  return p;
+}
+
+/** A body's text: as stored, or its bytes decoded. */
+function textOf(b: Stored | Uint8Array): string {
+  if (b === null) return "";
+  if (typeof b === "string") return b;
+  return decodeUtf8(b, false);
+}
+
+function jsonOf(b: Stored | Uint8Array): any {
+  return JSON.parse(textOf(b));
+}
+
 function bodyUsedError(): TypeError {
   const e = new TypeError("Body already used");
   (e as any).code = "ERR_BODY_ALREADY_USED";
@@ -299,6 +410,12 @@ function sizeLabel(n: number): string {
 
 // (Read ahead of a consumer: past it, the connection is paused.)
 const INCOMING_LIMIT = 1 << 20;
+
+/** What an arriving body comes from (fetch()'s request). */
+export interface IncomingOwner {
+  _pause(paused: boolean): void;
+  _cancel(): void;
+}
 
 /**
  * A body arriving over a connection (fetch()'s responses), as Bun's
@@ -317,12 +434,11 @@ export class Incoming {
   reject: ((e: unknown) => void) | null = null;
   // Once it is a stream.
   controller: ReadableStreamDefaultController<Uint8Array> | null = null;
-  pause: (paused: boolean) => void;
-  cancel: () => void;
+  // What pauses the connection, or ends it when the body is canceled.
+  owner: IncomingOwner;
 
-  constructor(pause: (paused: boolean) => void, cancel: () => void) {
-    this.pause = pause;
-    this.cancel = cancel;
+  constructor(owner: IncomingOwner) {
+    this.owner = owner;
   }
 
   push(chunk: Uint8Array): void {
@@ -353,7 +469,7 @@ export class Incoming {
 
   setPaused(p: boolean): void {
     this.paused = p;
-    this.pause(p);
+    this.owner._pause(p);
   }
 
   joined(): Uint8Array {
@@ -389,7 +505,7 @@ export class Incoming {
         return Promise.resolve();
       },
       () => {
-        if (!this.done && !this.failed) this.cancel();
+        if (!this.done && !this.failed) this.owner._cancel();
         return Promise.resolve();
       },
       65536,
@@ -427,15 +543,18 @@ class Body {
       if (incoming !== null) {
         s = incoming.stream();
         this._incoming = null;
-        this._stream = s;
-        if (this._used) s._disturbed = true;
-        return s;
+      } else {
+        // (No body: null, read or not, as Bun's.)
+        if (this._body === null) return null;
+        s = streamOfBytes(this._used ? new Uint8Array(0) : storedBytes(this._body));
+        this._streamOfBody = true;
       }
-      if (this._body === null && !this._used) return null;
-      s = streamOfBytes(this._used ? new Uint8Array(0) : storedBytes(this._body));
-      if (this._used) s._disturbed = true;
+      // (A body already read: its stream is locked, as Bun's.)
+      if (this._used) {
+        s._disturbed = true;
+        new ReadableStreamDefaultReader(s);
+      }
       this._stream = s;
-      this._streamOfBody = true;
     }
     return s;
   }
@@ -458,37 +577,72 @@ class Body {
       return this._body;
     }
     if (this._streamOfBody) {
-      // (Not read: the stored body, the stream done with.)
+      // (Not read: the stored body. The stream is done with, and locked, as
+      // Bun 1.4.3's is.)
+      new ReadableStreamDefaultReader(s);
       readableStreamCancel(s, undefined);
       return this._body;
     }
     return readAllBytes(s);
   }
 
-  async text(): Promise<string> {
-    const c = this._consume();
-    const b = c instanceof Promise ? await c : c;
-    if (b === null) return "";
-    if (typeof b === "string") return b;
-    return decodeUtf8(b, false);
+  // (Not async functions: a stored body's promise is made settled, as
+  // Bun's are.)
+  text(): Promise<string> {
+    // (A stored body, not read yet.)
+    if (this._stream === null && this._incoming === null && !this._used) {
+      this._used = true;
+      return Promise.resolve(textOf(this._body));
+    }
+    let c: Stored | Promise<Uint8Array>;
+    try {
+      c = this._consume();
+    } catch (e) {
+      return rejected(e);
+    }
+    if (c instanceof Promise) return c.then(textOf);
+    return Promise.resolve(textOf(c));
   }
 
-  async json(): Promise<any> {
-    return JSON.parse(await this.text());
+  json(): Promise<any> {
+    let c: Stored | Promise<Uint8Array>;
+    try {
+      c = this._consume();
+    } catch (e) {
+      return rejected(e);
+    }
+    if (c instanceof Promise) return c.then(jsonOf);
+    let v: any;
+    try {
+      v = jsonOf(c);
+    } catch (e) {
+      return rejected(e);
+    }
+    return resolved(v);
   }
 
-  async arrayBuffer(): Promise<ArrayBuffer> {
-    const c = this._consume();
-    if (c instanceof Promise) return bufferOf(await c);
-    if (c === null) return new ArrayBuffer(0);
-    return typeof c === "string" ? (encodeUtf8(c).buffer as ArrayBuffer) : c.slice(0);
+  arrayBuffer(): Promise<ArrayBuffer> {
+    let c: Stored | Promise<Uint8Array>;
+    try {
+      c = this._consume();
+    } catch (e) {
+      return rejected(e);
+    }
+    if (c instanceof Promise) return c.then(bufferOf);
+    if (c === null) return resolved(new ArrayBuffer(0));
+    return resolved(typeof c === "string" ? (encodeUtf8(c).buffer as ArrayBuffer) : c.slice(0));
   }
 
-  async bytes(): Promise<Uint8Array> {
-    const c = this._consume();
-    if (c instanceof Promise) return await c;
-    if (c === null) return new Uint8Array(0);
-    return typeof c === "string" ? encodeUtf8(c) : new Uint8Array(c.slice(0));
+  bytes(): Promise<Uint8Array> {
+    let c: Stored | Promise<Uint8Array>;
+    try {
+      c = this._consume();
+    } catch (e) {
+      return rejected(e);
+    }
+    if (c instanceof Promise) return c;
+    if (c === null) return resolved(new Uint8Array(0));
+    return resolved(typeof c === "string" ? encodeUtf8(c) : new Uint8Array(c.slice(0)));
   }
 
   /** The body's content type (overridden: Request's and Response's headers). */
@@ -540,9 +694,11 @@ export class Response extends Body {
   // headers have none (as Bun's, not in the headers).
   _contentType: string | null = null;
   _defaultType: string | null = null;
-  // (fetch()'s: the URL it answers, and whether redirects led there.)
+  // (fetch()'s: the URL it answers, whether redirects led there, and the
+  // headers as they came, [name, value, ...], until `headers` is read.)
   _url = "";
   _redirected = false;
+  _rawHeaders: string[] | null = null;
 
   constructor(body?: BodyInit, init?: ResponseInit) {
     super(store(body));
@@ -573,7 +729,7 @@ export class Response extends Body {
   }
 
   _mime(): string | null {
-    const h = this._headers;
+    const h = this._headers ?? (this._rawHeaders !== null ? this.headers : null);
     if (h !== null) return h.get("content-type") ?? this._defaultType;
     return this._contentType ?? this._defaultType;
   }
@@ -581,17 +737,23 @@ export class Response extends Body {
   get headers(): Headers {
     let h = this._headers;
     if (h === null) {
-      h = new Headers();
-      if (this._contentType !== null) h.append("content-type", this._contentType);
+      const raw = this._rawHeaders;
+      if (raw !== null) {
+        h = Headers._fromFlat(raw);
+        this._rawHeaders = null;
+      } else {
+        h = new Headers();
+        if (this._contentType !== null) h.append("content-type", this._contentType);
+        this._contentType = null;
+      }
       this._headers = h;
-      this._contentType = null;
     }
     return h;
   }
 
   /** The headers as the server writes them: [name, value, ...]. */
   _flat(): string[] {
-    const h = this._headers;
+    const h = this._headers ?? (this._rawHeaders !== null ? this.headers : null);
     if (h === null) {
       const type = this._contentType ?? this._defaultType;
       return type === null ? [] : ["content-type", type];
@@ -622,6 +784,8 @@ export class Response extends Body {
     const r = new Response(null, { status: this.status, statusText: this.statusText, headers: this.headers });
     this._cloneBodyTo(r);
     r._defaultType = this._defaultType;
+    r._url = this._url;
+    r._redirected = this._redirected;
     return r;
   }
 
@@ -652,7 +816,9 @@ export class Response extends Body {
   }
 
   [describe](f: Formatter): void {
-    const size = bodySize(this._body);
+    // (As Bun's: a used body has no size.)
+    const size = this.bodyUsed ? 0 : bodySize(this._body);
+    const tail = size > 0 ? `Blob (${size} bytes)` : undefined;
     f.record(
       `Response ${sizeLabel(size)}`,
       [
@@ -664,7 +830,7 @@ export class Response extends Body {
         ["redirected", this.redirected],
         ["bodyUsed", this.bodyUsed],
       ],
-      { tail: size > 0 ? `Blob (${size} bytes)` : undefined },
+      { tail, lastComma: tail !== undefined, full: true },
     );
   }
 }
@@ -764,7 +930,7 @@ export class Request extends Body {
   }
 
   [describe](f: Formatter): void {
-    const size = bodySize(this._body);
+    const size = this.bodyUsed ? 0 : bodySize(this._body);
     f.record(
       `Request ${sizeLabel(size)}`,
       [
@@ -772,7 +938,7 @@ export class Request extends Body {
         ["url", this.url],
         ["headers", this.headers],
       ],
-      { tail: size > 0 ? `Blob (${size} bytes)` : undefined, lastComma: false },
+      { tail: size > 0 ? `Blob (${size} bytes)` : undefined, lastComma: false, full: true },
     );
   }
 }

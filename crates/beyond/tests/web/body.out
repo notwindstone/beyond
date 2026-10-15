@@ -30,3 +30,130 @@ text/x 3 abc b 3
 TypeError
 ["Kei"] true b.bin
 name,file,bin
+Headers {
+  "content-type": "text/x",
+  "accept": "*/*",
+  "set-cookie": [ "x", "y" ],
+  "b": "1, 4",
+  "a": "2",
+  "c": "3",
+}
+{
+  "content-type": "text/x",
+  accept: "*/*",
+  "set-cookie": [ "x", "y" ],
+  b: "1, 4",
+  a: "2",
+  c: "3",
+}
+{"content-type":"text/x","accept":"*/*","set-cookie":["x","y"],"b":"1, 4","a":"2","c":"3"}
+Headers {
+  "content-type": "text/x",
+  "accept": "*/*",
+  "set-cookie": [ "x", "y" ],
+  "a": "9",
+  "c": "3",
+  "b": "5",
+}
+Headers {}
+Headers {
+  "x-one": "1",
+}
+Response (0 KB) {
+  ok: true,
+  url: "",
+  status: 200,
+  statusText: "",
+  headers: Headers {},
+  redirected: false,
+  bodyUsed: false
+}
+Response (3 bytes) {
+  ok: true,
+  url: "",
+  status: 200,
+  statusText: "",
+  headers: Headers {},
+  redirected: false,
+  bodyUsed: false,
+  Blob (3 bytes)
+}
+Response (0 KB) {
+  ok: true,
+  url: "",
+  status: 200,
+  statusText: "",
+  headers: Headers {},
+  redirected: false,
+  bodyUsed: true
+}
+Response (0 KB) {
+  ok: true,
+  url: "",
+  status: 201,
+  statusText: "Made",
+  headers: Headers {
+    "z": "1",
+    "a": "2",
+  },
+  redirected: false,
+  bodyUsed: false
+}
+Request (0 KB) {
+  method: "GET",
+  url: "http://x/",
+  headers: Headers {}
+}
+Request (3 bytes) {
+  method: "POST",
+  url: "http://x/",
+  headers: Headers {}
+  Blob (3 bytes)
+}
+Request (0 KB) {
+  method: "POST",
+  url: "http://x/",
+  headers: Headers {}
+}
+Request (0 KB) {
+  method: "GET",
+  url: "http://x/",
+  headers: Headers {
+    "a": "1",
+  }
+}
+[
+  Response (1 bytes) {
+    ok: true,
+    url: "",
+    status: 200,
+    statusText: "",
+    headers: Headers {},
+    redirected: false,
+    bodyUsed: false,
+    Blob (1 bytes)
+  }
+]
+{
+  r: Response (1 bytes) {
+    ok: true,
+    url: "",
+    status: 200,
+    statusText: "",
+    headers: Headers {},
+    redirected: false,
+    bodyUsed: false,
+    Blob (1 bytes)
+  },
+}
+a=1; b=2 1, 2 [
+  [ "cookie", "a=1; b=2" ], [ "x", "1, 2" ]
+] Headers {
+  "cookie": "a=1; b=2",
+  "x": "1, 2",
+}
+{
+  "2": "c",
+  "10": "a",
+  z: "b",
+}

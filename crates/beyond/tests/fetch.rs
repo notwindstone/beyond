@@ -152,6 +152,12 @@ fn answer(s: &mut TcpStream, req: &Req) -> bool {
             send(s, "200 OK", &[], b"bye");
             return false;
         }
+        // Closed without an answer.
+        (_, "/reset") => return false,
+        (_, "/garbage") => {
+            let _ = s.write_all(b"NOT HTTP AT ALL\r\n\r\n");
+            return false;
+        }
         (_, "/big") => send(s, "200 OK", &[], &vec![b'x'; 8 << 20]),
         (_, "/slow") => {
             let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nxxxxxxxxxx");

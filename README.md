@@ -67,9 +67,11 @@ networking code uses its extensions), zlib and brotli's decoder
   `"manual"`, `"error"`; 303, and 301/302 of a POST, as a GET), and an
   `AbortSignal` aborting the request or the body being read. The response's
   body is read as it arrives: it is buffered while nothing reads it, and the
-  connection is paused while more than 1 MB is waiting. Its errors are
-  Bun's (`ConnectionRefused`, `ENOTFOUND`, `UnexpectedRedirect`, ...), with
-  their codes. Request bodies are sent whole (a stream is read first).
+  connection is paused while more than 1 MB is waiting; a response that
+  came whole with its head is handed over at once. Its errors are Bun's
+  (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `UnexpectedRedirect`, ...),
+  with their codes, messages and properties. Request bodies are sent whole
+  (a stream is read first).
 - `Blob`, `File` and `FormData`; bodies of them, of strings, bytes and
   `URLSearchParams` (multipart/form-data written and read, urlencoded
   read: `formData()`, `blob()`), with their content types as Bun gives them.
@@ -97,8 +99,8 @@ networking code uses its extensions), zlib and brotli's decoder
   internationalized domains (punycode, and UTS #46's mapping approximated
   with NFKC, lower case and the Unicode categories), all the setters. It
   passes all of the web platform tests' URL data (urltestdata 896/896,
-  setters 278/278, toascii 87/87; Bun: 881, 274 and 80) and 2626 of the
-  2634 IdnaTestV2 cases (Bun: 1867).
+  setters 278/278, toascii 87/87; Bun: 881, 274 and 80) and 2668 of the
+  2675 IdnaTestV2 cases (Bun: 1909).
 - `TextEncoder` and `TextDecoder`: UTF-8 (native: Rust's validation and its
   lossy decoding, which is the standard's), UTF-16LE/BE and windows-1252
   (the standard's `latin1` and `ascii`), `fatal`, `ignoreBOM` and streaming.
@@ -117,7 +119,7 @@ networking code uses its extensions), zlib and brotli's decoder
   a buffer), `structuredClone` (with `transfer`), `self`; and from
   QuickJS-NG, `queueMicrotask`, `atob`, `btoa`, `DOMException`.
 
-The tests (`cargo test`) run programs whose output must be Bun's, the WPT
+The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT
 URL data and streams tests, a server answering over TCP, and `fetch()`
 against a server of the test's own.
 
@@ -129,26 +131,28 @@ excerpt, and their stacks' lines are the bundle's.
 
 ## Performance
 
-`Beyond.serve` against `Bun.serve` (Bun 1.4.2), the same program
+Against Bun 1.4.3 on the same 4-core machine, runs alternated
+(`bench/run.sh`, which needs `bun` and `oha`).
+
+`Beyond.serve` against `Bun.serve`: the same program
 (`new Response("Hello World!")`, and `Response.json({...})` of a small
-object), 10 seconds of `oha -c 50` on the same 4-core machine as the
-server, runs alternated:
+object, bench/serve-*.ts), 10 seconds of `oha -c 50` on the machine the
+server runs on:
 
 | | requests/s | p99 latency | memory (RSS) |
 |---|---|---|---|
-| Beyond, text | 122,973 | 0.90 ms | 21 MB |
-| Bun, text | 111,861 | 1.18 ms | 25 MB |
-| Beyond, JSON | 115,680 | 0.97 ms | 22 MB |
-| Bun, JSON | 107,297 | 1.23 ms | 27 MB |
+| Beyond, text | 98,016 | 1.34 ms | 21 MB |
+| Bun, text | 89,400 | 1.62 ms | 24 MB |
+| Beyond, JSON | 92,627 | 1.35 ms | 21 MB |
+| Bun, JSON | 84,799 | 1.69 ms | 25 MB |
 
-Beyond answers about 10% more text and 8% more JSON requests a second than
-Bun, with lower tail latency, in about 80% of the memory (the load
+Beyond answers about 10% more text and 9% more JSON requests a second than
+Bun, with lower tail latency, in about 85% of the memory (the load
 generator shares the cores). What got it there:
 
 - The request path is native code: `Headers`, `Request` and `Response`
   keep their state in plain fields and check without regular expressions
-  (before that, Beyond answered 37,661 text and 25,350 JSON requests a
-  second).
+  (before that, Beyond answered about a third as many text requests).
 - A program's globals (`Response`, `Request`, `URL`, ...) are bindings of
   Beyond's modules to Luminous (`--global`): `new Response(...)` is the
   class's native constructor, not the engine constructing a global (+15%).
@@ -159,6 +163,45 @@ generator shares the cores). What got it there:
   `Symbol.hasInstance` when it cannot have been replaced, and
   `JSON.stringify` of plain data straight from object shapes (a small
   object's went from about 8,800 instructions to a few hundred).
+
+`fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
+server in another process, 1, 10 or 50 of them in flight, each response
+read with `text()` (bench/fetch.ts), three rounds a run, two runs each:
+
+| in flight | Beyond | Bun |
+|---|---|---|
+| 1 | 21,538 fetches/s | 11,369 fetches/s |
+| 10 | 112,381 fetches/s | 66,260 fetches/s |
+| 50 | 108,853 fetches/s | 85,200 fetches/s |
+
+Beyond's client does about 90% more fetches a second than Bun's one at a
+time, 70% more with 10 in flight and 28% more with 50, on one thread (Bun
+gives its client a thread of its own), at a peak of 22 MB (Bun: 32 MB).
+A fetch of a small response went from about 77,000 instructions to about
+15,000:
+
+- A response whose head and body come together (most) is handed to
+  JavaScript as one event, its body as bytes, after its connection is back
+  in the pool; the head is parsed where the socket's bytes are, and each
+  request slot keeps its buffers.
+- `fetch()` keeps a request's state in an object of a class (no closures
+  per request: one handler for every request's events), takes a URL with
+  nothing else without making a `Request`, and keeps the head of a GET of
+  a URL it fetched recently. A response's headers are made from the
+  received ones only when read.
+- Its promise, and the ones `text()`, `json()` and the like return, are
+  made settled or settled from native code, without resolving functions
+  (Luminous's `JS_NewPendingPromise`); native async functions' promises
+  are too.
+- In the engine (Luminous's patch 0003): resolving functions made with
+  their properties at once (each was two property definitions), the
+  property array of every object in its own allocation (functions,
+  arrays, promises, typed arrays were each two allocations), and a string
+  literal's hash reused as a `Map` key.
+- The native side no longer throws (and catches) an exception to tell a
+  typed array from an `ArrayBuffer`, which cost every request a
+  `TypeError` with its stack: 14% of a fetch then. Header names are found
+  in a hash table, and picohttpparser scans with SSE4.2.
 
 Streaming a large body is slower than Bun's for now: 256 MB in 64 KB chunks
 takes 1.25 s (Bun: 0.81 s).

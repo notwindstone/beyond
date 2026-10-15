@@ -93,7 +93,9 @@ export class FormData {
   }
 
   [describe](f: Formatter): void {
-    f.record("FormData", this._entries.map((e) => [e[0], e[1]]), { quoteKeys: true });
+    // (Empty, Bun shows it as an empty object: `{}`, or `[Object ...]`.)
+    if (this._entries.length === 0) f.write(f.tooDeep() ? "[Object ...]" : "{}");
+    else f.record("FormData", this._entries.map((e) => [e[0], e[1]]), { quoteKeys: true });
   }
 }
 

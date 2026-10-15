@@ -55,7 +55,7 @@ function send(handle: number, res: unknown): void {
   // (A stream `body` made of the stored body, unread: the stored body.)
   if (stream === null || (res._streamOfBody && !stream._disturbed && stream._reader === undefined)) {
     // (Most responses have no headers object: only a content type.)
-    if (res._headers === null) respond(handle, res.status, res.statusText, null, res._body, res._contentType ?? res._defaultType);
+    if (res._headers === null && res._rawHeaders === null) respond(handle, res.status, res.statusText, null, res._body, res._contentType ?? res._defaultType);
     else respond(handle, res.status, res.statusText, res._flat(), res._body, null);
     return;
   }

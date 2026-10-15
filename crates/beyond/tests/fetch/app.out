@@ -6,8 +6,8 @@ request headers x-custom=yes;connection=keep-alive;user-agent=*;accept=*/*;host=
 own headers accept=text/plain;accept-encoding=identity;connection=keep-alive;user-agent=mine;host=*;
 redirect [ 200, "B/final?x=1", true, "final /final?x=1" ]
 manual [ 302, "/final?x=1", false ]
-error threw TypeError "UnexpectedRedirect fetching \"B/redir\". For more information, pass `verbose: true` in the second argument to fetch()" UnexpectedRedirect TypeError 0 B/redir
-loop threw TypeError "The response redirected too many times. For more information, pass `verbose: true` in the second argument to fetch()" TooManyRedirects TypeError 0 B/loop
+error threw TypeError "UnexpectedRedirect fetching \"B/redir\". For more information, pass `verbose: true` in the second argument to fetch()" UnexpectedRedirect TypeError 0 B/redir undefined undefined
+loop threw TypeError "TooManyRedirects: The response redirected too many times. For more information, pass `verbose: true` in the second argument to fetch()" TooManyRedirects TypeError 0 B/loop undefined undefined
 gzip [ 1100, "hello gzip " ]
 deflate hello deflate
 br [ 650, "hello brotli " ]
@@ -35,14 +35,17 @@ json {
 }
 used [ true, "ERR_BODY_ALREADY_USED" ]
 clone [ 70005, 70005 ]
-abort mid-body threw DOMException "The operation was aborted." 20 AbortError undefined null
-abort before head threw DOMException "The operation was aborted." 20 AbortError undefined null
+abort mid-body threw DOMException "The operation was aborted." 20 AbortError undefined null undefined undefined
+abort before head threw DOMException "The operation was aborted." 20 AbortError undefined null undefined undefined
 cancel body canceled
 parallel hello keep-alive|hello keep-alive|hello keep-alive|hello keep-alive|hello keep-alive
 server closed [ "bye", "hello keep-alive" ]
-refused threw TypeError "Unable to connect. Is the computer able to access the url?" ConnectionRefused TypeError 0 http://127.0.0.1:1/
-bad url threw TypeError "fetch() URL is invalid" ERR_INVALID_URL TypeError undefined null
-ftp threw TypeError "protocol must be http:, https: or s3:" ERR_INVALID_ARG_VALUE TypeError undefined null
-aborted threw DOMException "The operation was aborted." 20 AbortError undefined null
-abort reason threw Error "mine" undefined Error undefined null
-get body threw TypeError "fetch() request with GET/HEAD method cannot have body." ERR_INVALID_ARG_VALUE TypeError undefined null
+refused threw TypeError "ECONNREFUSED: Unable to connect. Is the computer able to access the url?" ECONNREFUSED TypeError 0 http://127.0.0.1:1/ undefined undefined
+reset threw TypeError "ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()" ECONNRESET TypeError 0 B/reset undefined undefined
+garbage threw TypeError "Malformed_HTTP_Response fetching \"B/garbage\". For more information, pass `verbose: true` in the second argument to fetch()" Malformed_HTTP_Response TypeError 0 B/garbage undefined undefined
+dns threw TypeError "getaddrinfo ENOTFOUND nonexistent.invalid" ENOTFOUND TypeError 4 http://nonexistent.invalid/ getaddrinfo nonexistent.invalid
+bad url threw TypeError "fetch() URL is invalid" ERR_INVALID_URL TypeError undefined null undefined undefined
+ftp threw TypeError "protocol must be http:, https: or s3:" ERR_INVALID_ARG_VALUE TypeError undefined null undefined undefined
+aborted threw DOMException "The operation was aborted." 20 AbortError undefined null undefined undefined
+abort reason threw Error "mine" undefined Error undefined null undefined undefined
+get body threw TypeError "fetch() request with GET/HEAD method cannot have body." ERR_INVALID_ARG_VALUE TypeError undefined null undefined undefined

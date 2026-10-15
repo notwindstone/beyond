@@ -83,7 +83,7 @@ same true
 bodyUsed after body false
 text after body hello
 bodyUsed after text true
-body after text ReadableStream { locked: false, state: 'closed', supportsBYOB: false }
+body after text ReadableStream { locked: true, state: 'closed', supportsBYOB: false }
 bodyUsed locked true
 text locked threw TypeError Body already used ERR_BODY_ALREADY_USED
 read {

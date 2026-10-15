@@ -3,9 +3,13 @@
 // idle keep-alive one to the same host and port, else a new one), writes
 // its bytes, and has the response parsed with picohttpparser: its head, then
 // its body, unframed (Content-Length, chunked, or until the connection
-// closes) and decoded (gzip, deflate, br, zstd). What happens is handed to the
-// request's JavaScript callback: (HEAD, status, statusText, [name, value,
-// ...]), (DATA, Uint8Array), (END) or (ERROR, code, message).
+// closes) and decoded (gzip, deflate, br, zstd). What happens is handed to
+// the JavaScript handler `fetchInit` set, with the request's task:
+// (task, HEAD, status, statusText, [name, value, ...]), (task, DATA,
+// Uint8Array), (task, END), (task, ERROR, code, message), or, when the head
+// and the whole body came together (most responses), (task, COMPLETE,
+// status, statusText, [name, value, ...], ArrayBuffer), the connection back
+// in the pool first.
 
 #define _GNU_SOURCE
 #include <brotli/decode.h>
@@ -26,12 +30,13 @@
 
 int beyond_js_run_jobs(void);
 JSContext *beyond_js_context(void);
+JSValue beyond_common_string(JSContext *ctx, const char *p, size_t n);
 void beyond_js_report(void);
 struct us_loop_t *uws_get_loop(void);
 
 #define KIND_FETCH 40
 
-enum { EV_HEAD = 1, EV_DATA = 2, EV_END = 3, EV_ERROR = 4 };
+enum { EV_HEAD = 1, EV_DATA = 2, EV_END = 3, EV_ERROR = 4, EV_COMPLETE = 5 };
 enum { R_CONNECT, R_HEAD, R_BODY, R_DONE };
 enum { ENC_NONE, ENC_GZIP, ENC_DEFLATE, ENC_BR, ENC_ZSTD };
 
@@ -40,18 +45,28 @@ enum { ENC_NONE, ENC_GZIP, ENC_DEFLATE, ENC_BR, ENC_ZSTD };
 typedef struct {
     uint32_t gen;
     bool live;
-    JSValue cb;
+    JSValue task;
     struct us_socket_t *s;
     struct us_connecting_socket_t *cs;
     char host[256];
     int port;
     char key[KEY_MAX];
-    // The request's bytes, and how many are written.
+    // The request's bytes, and how many are written (the buffers are kept
+    // for the slot's next request).
     char *out;
-    size_t out_len, out_off;
+    size_t out_len, out_off, out_cap;
     // Response bytes not parsed yet (the head; chunked framing).
     char *in;
     size_t in_len, in_cap;
+    // While the head's bytes are read on: the body is collected rather than
+    // handed over (one piece borrowed, `col_ptr`, or copies in `col`), and the
+    // head kept until it is.
+    bool collect;
+    const uint8_t *col_ptr;
+    uint8_t *col;
+    size_t col_len, col_cap;
+    int status;
+    JSValue status_text, flat;
     int state;
     bool head_only;
     // Content-Length left; -1: until the connection closes; -2: chunked.
@@ -119,10 +134,16 @@ static uint32_t req_alloc(void) {
     }
     Req *r = reqs[i];
     uint32_t gen = r->gen;
+    char *out = r->out, *in = r->in;
+    uint8_t *col = r->col;
+    size_t out_cap = r->out_cap, in_cap = r->in_cap, col_cap = r->col_cap;
     memset(r, 0, sizeof *r);
     r->gen = gen;
     r->live = true;
-    r->cb = JS_UNDEFINED;
+    r->out = out, r->out_cap = out_cap;
+    r->in = in, r->in_cap = in_cap;
+    r->col = col, r->col_cap = col_cap;
+    r->task = r->status_text = r->flat = JS_UNDEFINED;
     return i;
 }
 
@@ -141,15 +162,26 @@ static void decoder_end(Req *r) {
     }
 }
 
+// (Buffers past this are freed rather than kept for the next request.)
+#define KEEP_BUFFER (64 * 1024)
+
 static void req_free(uint32_t i) {
     Req *r = reqs[i];
     if (!r->live)
         return;
-    JS_FreeValue(beyond_js_context(), r->cb);
-    r->cb = JS_UNDEFINED;
-    free(r->out);
-    free(r->in);
-    r->out = r->in = NULL;
+    r->task = r->status_text = r->flat = JS_UNDEFINED;
+    if (r->out_cap > KEEP_BUFFER) {
+        free(r->out);
+        r->out = NULL, r->out_cap = 0;
+    }
+    if (r->in_cap > KEEP_BUFFER) {
+        free(r->in);
+        r->in = NULL, r->in_cap = 0;
+    }
+    if (r->col_cap > KEEP_BUFFER) {
+        free(r->col);
+        r->col = NULL, r->col_cap = 0;
+    }
     decoder_end(r);
     r->live = false;
     r->gen++;
@@ -170,39 +202,53 @@ static Req *req_of(double h, uint32_t *index) {
     return reqs[i];
 }
 
+// (task, type, ...) => void: fetch()'s, for every request.
+static JSValue handler = JS_UNDEFINED;
+
 void beyond_client_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
-    for (uint32_t i = 0; i < nreqs; i++)
-        if (reqs[i]->live)
-            JS_MarkValue(rt, reqs[i]->cb, mark_func);
+    JS_MarkValue(rt, handler, mark_func);
+    for (uint32_t i = 0; i < nreqs; i++) {
+        if (reqs[i]->live) {
+            JS_MarkValue(rt, reqs[i]->task, mark_func);
+            JS_MarkValue(rt, reqs[i]->status_text, mark_func);
+            JS_MarkValue(rt, reqs[i]->flat, mark_func);
+        }
+    }
 }
 
-// Calls the request's callback; false if the request is gone after it (the
-// callback aborted it).
+// Calls the handler with the request's task and argv (an event); false if
+// the request is gone after it (the handler aborted it).
 static bool emit(uint32_t i, int argc, JSValue *argv) {
     JSContext *ctx = beyond_js_context();
     Req *r = reqs[i];
     uint32_t gen = r->gen;
-    JSValue cb = JS_DupValue(ctx, r->cb);
-    JSValue res = JS_Call(ctx, cb, JS_UNDEFINED, argc, argv);
-    JS_FreeValue(ctx, cb);
+    JSValue args[6];
+    args[0] = r->task;
     for (int k = 0; k < argc; k++)
-        JS_FreeValue(ctx, argv[k]);
+        args[k + 1] = argv[k];
+    JSValue res = JS_Call(ctx, handler, JS_UNDEFINED, argc + 1, args);
     if (JS_IsException(res))
         beyond_js_report();
-    JS_FreeValue(ctx, res);
     return i < nreqs && reqs[i]->live && reqs[i]->gen == gen;
 }
 
 static Ext *ext_of(struct us_socket_t *s) { return us_socket_ext(s); }
 
-// Ends the request with an error (the connection closed).
-static void fail(uint32_t i, const char *code, const char *message) {
+// What kind of failure an error is (its message is made in JavaScript, as
+// Bun's are): one of the connection's or the response's, connecting, or
+// resolving the host.
+enum { FAIL_OTHER = 0, FAIL_CONNECT = 1, FAIL_DNS = 2 };
+
+// Ends the request with an error (the connection closed): ERROR, its code
+// and kind.
+static void fail(uint32_t i, const char *code, int kind) {
     JSContext *ctx = beyond_js_context();
     Req *r = reqs[i];
     struct us_socket_t *s = r->s;
     struct us_connecting_socket_t *cs = r->cs;
     r->s = NULL;
     r->cs = NULL;
+    r->collect = false;
     if (s && !us_socket_is_closed(s)) {
         ext_of(s)->req = -1;
         us_socket_close(s, 0, NULL);
@@ -210,14 +256,19 @@ static void fail(uint32_t i, const char *code, const char *message) {
         ((Ext *)us_connecting_socket_ext(cs))->req = -1;
         us_connecting_socket_close(cs);
     }
-    JSValue argv[3] = {JS_NewInt32(ctx, EV_ERROR), JS_NewString(ctx, code), JS_NewString(ctx, message)};
+    JSValue argv[3] = {JS_NewInt32(ctx, EV_ERROR), JS_NewString(ctx, code), JS_NewInt32(ctx, kind)};
     if (emit(i, 3, argv))
         req_free(i);
 }
 
-// The response is complete: END, and the connection back to the pool (or
-// closed).
-static void finish(uint32_t i) {
+// What a response's bytes did: the request goes on, its response is
+// complete (the body collected), or the request is gone (ended, failed or
+// aborted).
+enum { GO_ON, COMPLETE, GONE };
+
+// The response is complete: the connection back to the pool (or closed),
+// then END (unless the body is collected: the caller hands it over).
+static int finish(uint32_t i) {
     JSContext *ctx = beyond_js_context();
     Req *r = reqs[i];
     struct us_socket_t *s = r->s;
@@ -234,21 +285,89 @@ static void finish(uint32_t i) {
             us_socket_close(s, 0, NULL);
         }
     }
+    if (r->collect)
+        return COMPLETE;
     JSValue argv[1] = {JS_NewInt32(ctx, EV_END)};
     if (emit(i, 1, argv))
         req_free(i);
+    return GONE;
 }
 
-// Hands body bytes to JavaScript, decoded. False if the request is gone.
-static bool deliver(uint32_t i, const uint8_t *data, size_t len) {
+static bool reserve(uint8_t **buf, size_t *cap, size_t need) {
+    if (need <= *cap)
+        return true;
+    size_t c = need < 4096 ? 4096 : need * 2;
+    uint8_t *b = realloc(*buf, c);
+    if (!b)
+        return false;
+    *buf = b;
+    *cap = c;
+    return true;
+}
+
+// Hands the head over (HEAD), then what was collected of the body (DATA):
+// from now on the body is handed over as it arrives. False if the request
+// is gone.
+static bool flush_head(uint32_t i) {
     JSContext *ctx = beyond_js_context();
+    Req *r = reqs[i];
+    r->collect = false;
+    JSValue argv[4] = {JS_NewInt32(ctx, EV_HEAD), JS_NewInt32(ctx, r->status), r->status_text, r->flat};
+    r->status_text = r->flat = JS_UNDEFINED;
+    if (!emit(i, 4, argv))
+        return false;
+    size_t n = r->col_len;
+    if (n == 0)
+        return true;
+    const uint8_t *p = r->col_ptr ? r->col_ptr : r->col;
+    r->col_ptr = NULL;
+    r->col_len = 0;
+    JSValue data[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, p, n)};
+    return emit(i, 2, data);
+}
+
+// (Collected past this, the head and the body so far are handed over.)
+#define COLLECT_MAX (1 << 20)
+
+// Body bytes, decoded: collected, or handed over (DATA). `borrow`: they stay
+// valid until the response's bytes are done with. False if the request is
+// gone.
+static bool hand_over(uint32_t i, const uint8_t *data, size_t n, bool borrow) {
+    JSContext *ctx = beyond_js_context();
+    Req *r = reqs[i];
+    if (r->collect) {
+        if (r->col_len + n <= COLLECT_MAX) {
+            if (r->col_len == 0 && borrow) {
+                r->col_ptr = data;
+                r->col_len = n;
+                return true;
+            }
+            if (!reserve(&r->col, &r->col_cap, r->col_len + n)) {
+                fail(i, "OutOfMemory", FAIL_OTHER);
+                return false;
+            }
+            if (r->col_ptr) {
+                memcpy(r->col, r->col_ptr, r->col_len);
+                r->col_ptr = NULL;
+            }
+            memcpy(r->col + r->col_len, data, n);
+            r->col_len += n;
+            return true;
+        }
+        if (!flush_head(i))
+            return false;
+    }
+    JSValue argv[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, data, n)};
+    return emit(i, 2, argv);
+}
+
+// Body bytes: decoded, then handed over. False if the request is gone.
+static bool deliver(uint32_t i, const uint8_t *data, size_t len, bool borrow) {
     Req *r = reqs[i];
     if (len == 0)
         return true;
-    if (r->encoding == ENC_NONE) {
-        JSValue argv[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, data, len)};
-        return emit(i, 2, argv);
-    }
+    if (r->encoding == ENC_NONE)
+        return hand_over(i, data, len, borrow);
     uint8_t buf[65536];
     if (r->encoding == ENC_BR) {
         size_t avail_in = len;
@@ -259,14 +378,10 @@ static bool deliver(uint32_t i, const uint8_t *data, size_t len) {
             BrotliDecoderResult res =
                 BrotliDecoderDecompressStream(r->br, &avail_in, &next_in, &avail_out, &next_out, NULL);
             size_t n = sizeof buf - avail_out;
-            if (n > 0) {
-                JSValue argv[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, buf, n)};
-                if (!emit(i, 2, argv))
-                    return false;
-                r = reqs[i];
-            }
+            if (n > 0 && !hand_over(i, buf, n, false))
+                return false;
             if (res == BROTLI_DECODER_RESULT_ERROR) {
-                fail(i, "BrotliDecompressionError", "The response body could not be decompressed (br)");
+                fail(i, "BrotliDecompressionError", FAIL_OTHER);
                 return false;
             }
             if (res != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT)
@@ -279,15 +394,11 @@ static bool deliver(uint32_t i, const uint8_t *data, size_t len) {
             ZSTD_outBuffer out = {buf, sizeof buf, 0};
             size_t res = ZSTD_decompressStream(r->zstd, &out, &in);
             if (ZSTD_isError(res)) {
-                fail(i, "ZstdDecompressionError", "The response body could not be decompressed (zstd)");
+                fail(i, "ZstdDecompressionError", FAIL_OTHER);
                 return false;
             }
-            if (out.pos > 0) {
-                JSValue argv[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, buf, out.pos)};
-                if (!emit(i, 2, argv))
-                    return false;
-                r = reqs[i];
-            }
+            if (out.pos > 0 && !hand_over(i, buf, out.pos, false))
+                return false;
             // (Done with the input, and the output not cut short.)
             if (in.pos == in.size && out.pos < out.size)
                 return true;
@@ -300,16 +411,12 @@ static bool deliver(uint32_t i, const uint8_t *data, size_t len) {
         r->z.avail_out = sizeof buf;
         int res = inflate(&r->z, Z_NO_FLUSH);
         size_t n = sizeof buf - r->z.avail_out;
-        if (n > 0) {
-            JSValue argv[2] = {JS_NewInt32(ctx, EV_DATA), JS_NewUint8ArrayCopy(ctx, buf, n)};
-            if (!emit(i, 2, argv))
-                return false;
-            r = reqs[i];
-        }
+        if (n > 0 && !hand_over(i, buf, n, false))
+            return false;
         if (res == Z_STREAM_END)
             return true;
         if (res != Z_OK && res != Z_BUF_ERROR) {
-            fail(i, "ZlibError", "The response body could not be decompressed");
+            fail(i, "ZlibError", FAIL_OTHER);
             return false;
         }
         if (r->z.avail_in == 0 && r->z.avail_out != 0)
@@ -317,8 +424,7 @@ static bool deliver(uint32_t i, const uint8_t *data, size_t len) {
     }
 }
 
-static bool header_is(const struct phr_header *h, const char *name) {
-    size_t n = strlen(name);
+static bool header_is(const struct phr_header *h, const char *name, size_t n) {
     return h->name_len == n && !strncasecmp(h->name, name, n);
 }
 
@@ -330,22 +436,23 @@ static bool value_has(const struct phr_header *h, const char *token) {
     return false;
 }
 
-// Body bytes: unframed, then delivered. False if the request is gone.
-static bool body(uint32_t i, char *data, size_t len) {
+// Body bytes: unframed, then delivered.
+static int body(uint32_t i, char *data, size_t len) {
     Req *r = reqs[i];
     if (r->remaining >= 0) {
         size_t n = len < (uint64_t)r->remaining ? len : (size_t)r->remaining;
         r->remaining -= (int64_t)n;
-        if (!deliver(i, (uint8_t *)data, n))
-            return false;
-        if (reqs[i]->remaining == 0) {
-            finish(i);
-            return false;
-        }
-        return true;
+        // (Bytes past the body: the connection is not reused.)
+        if (n < len)
+            r->keep_alive = false;
+        if (!deliver(i, (uint8_t *)data, n, true))
+            return GONE;
+        if (reqs[i]->remaining == 0)
+            return finish(i);
+        return GO_ON;
     }
     if (r->remaining == -1)
-        return deliver(i, (uint8_t *)data, len);
+        return deliver(i, (uint8_t *)data, len, true) ? GO_ON : GONE;
     // Chunked: decoded in place (in a copy: `data` is the socket's buffer).
     if (r->in_len + len > r->in_cap) {
         r->in_cap = (r->in_len + len) * 2;
@@ -356,21 +463,25 @@ static bool body(uint32_t i, char *data, size_t len) {
     size_t size = r->in_len;
     ssize_t rest = phr_decode_chunked(&r->chunked, r->in, &size);
     if (rest == -1) {
-        fail(i, "ChunkedEncodingError", "The response body's chunked encoding is invalid");
-        return false;
+        fail(i, "ChunkedEncodingError", FAIL_OTHER);
+        return GONE;
     }
     r->in_len = 0;
-    if (!deliver(i, (uint8_t *)r->in, size))
-        return false;
-    if (rest >= 0) {
-        finish(i);
-        return false;
-    }
-    return true;
+    if (!deliver(i, (uint8_t *)r->in, size, true))
+        return GONE;
+    if (rest >= 0)
+        return finish(i);
+    return GO_ON;
 }
 
-// Response bytes: the head (once complete), then body. False if the
-// request is gone.
+// The status line's text: shared when it is "OK".
+static JSValue status_text(JSContext *ctx, const char *p, size_t n) {
+    if (n == 2 && p[0] == 'O' && p[1] == 'K')
+        return beyond_common_string(ctx, p, n);
+    return JS_NewStringLen(ctx, p, n);
+}
+
+// Response bytes: the head (once complete), then body.
 static void response_data(uint32_t i, char *data, size_t len) {
     JSContext *ctx = beyond_js_context();
     Req *r = reqs[i];
@@ -379,50 +490,69 @@ static void response_data(uint32_t i, char *data, size_t len) {
         body(i, data, len);
         return;
     }
-    if (r->in_len + len > r->in_cap) {
-        r->in_cap = (r->in_len + len) * 2 + 1024;
-        r->in = realloc(r->in, r->in_cap);
+    // (Parsed where it is, unless part of the head came before.)
+    char *buf = data;
+    size_t buf_len = len;
+    if (r->in_len) {
+        if (r->in_len + len > r->in_cap) {
+            r->in_cap = (r->in_len + len) * 2 + 1024;
+            r->in = realloc(r->in, r->in_cap);
+        }
+        memcpy(r->in + r->in_len, data, len);
+        r->in_len += len;
+        buf = r->in;
+        buf_len = r->in_len;
     }
-    memcpy(r->in + r->in_len, data, len);
-    r->in_len += len;
     for (;;) {
         int minor, status;
         const char *msg;
         size_t msg_len, num_headers = 100;
         struct phr_header headers[100];
-        int n = phr_parse_response(r->in, r->in_len, &minor, &status, &msg, &msg_len, headers, &num_headers, 0);
+        int n = phr_parse_response(buf, buf_len, &minor, &status, &msg, &msg_len, headers, &num_headers, 0);
         if (n == -2) {
-            if (r->in_len > 256 * 1024)
-                fail(i, "ResponseHeadersTooLarge", "The response's headers are too large");
+            if (buf_len > 256 * 1024) {
+                fail(i, "ResponseHeadersTooLarge", FAIL_OTHER);
+                return;
+            }
+            // (Kept until the rest of the head comes.)
+            if (buf_len > r->in_cap) {
+                r->in_cap = buf_len * 2 + 1024;
+                r->in = realloc(r->in, r->in_cap);
+            }
+            memmove(r->in, buf, buf_len);
+            r->in_len = buf_len;
             return;
         }
         if (n < 0) {
-            fail(i, "Malformed_HTTP_Response", "The response is not valid HTTP");
+            fail(i, "Malformed_HTTP_Response", FAIL_OTHER);
             return;
         }
         // (1xx: the final response follows.)
         if (status >= 100 && status < 200 && status != 101) {
-            memmove(r->in, r->in + n, r->in_len - n);
-            r->in_len -= n;
+            buf += n;
+            buf_len -= (size_t)n;
+            r->in_len = 0;
+            if (buf_len == 0)
+                return;
             continue;
         }
         r->keep_alive = minor >= 1;
         r->remaining = -1;
         r->encoding = ENC_NONE;
         bool no_body = r->head_only || status == 204 || status == 205 || status == 304;
-        JSValue flat = JS_NewArray(ctx);
-        uint32_t k = 0;
+        JSValue values[200];
+        int k = 0;
         for (size_t h = 0; h < num_headers; h++) {
             const struct phr_header *hd = &headers[h];
             if (!hd->name)
                 continue;
-            if (header_is(hd, "content-length"))
+            if (header_is(hd, "content-length", 14))
                 r->remaining = strtoll(hd->value, NULL, 10);
-            else if (header_is(hd, "transfer-encoding") && value_has(hd, "chunked"))
+            else if (header_is(hd, "transfer-encoding", 17) && value_has(hd, "chunked"))
                 r->remaining = -2;
-            else if (header_is(hd, "connection"))
+            else if (header_is(hd, "connection", 10))
                 r->keep_alive = value_has(hd, "keep-alive") || (minor >= 1 && !value_has(hd, "close"));
-            else if (header_is(hd, "content-encoding")) {
+            else if (header_is(hd, "content-encoding", 16)) {
                 if (value_has(hd, "br"))
                     r->encoding = ENC_BR;
                 else if (value_has(hd, "zstd"))
@@ -436,9 +566,12 @@ static void response_data(uint32_t i, char *data, size_t len) {
             size_t nl = hd->name_len < sizeof lower ? hd->name_len : sizeof lower;
             for (size_t c = 0; c < nl; c++)
                 lower[c] = (hd->name[c] >= 'A' && hd->name[c] <= 'Z') ? (char)(hd->name[c] | 32) : hd->name[c];
-            JS_SetPropertyUint32(ctx, flat, k++, JS_NewStringLen(ctx, lower, nl));
-            JS_SetPropertyUint32(ctx, flat, k++, JS_NewStringLen(ctx, hd->value, hd->value_len));
+            values[k++] = beyond_common_string(ctx, lower, nl);
+            values[k++] = JS_NewStringLen(ctx, hd->value, hd->value_len);
         }
+        r->status = status;
+        r->status_text = status_text(ctx, msg, msg_len);
+        r->flat = JS_NewArrayFrom(ctx, k, values);
         if (r->remaining == -2)
             memset(&r->chunked, 0, sizeof r->chunked);
         if (r->remaining == -1)
@@ -455,25 +588,37 @@ static void response_data(uint32_t i, char *data, size_t len) {
             inflateInit2(&r->z, r->encoding == ENC_GZIP ? 16 + MAX_WBITS : 32 + MAX_WBITS);
             r->z_init = true;
         }
-        size_t rest = r->in_len - (size_t)n;
-        char *tail = rest ? malloc(rest) : NULL;
-        if (rest)
-            memcpy(tail, r->in + n, rest);
+        // The body that came with the head: collected, and handed over with
+        // the head as one event if that is all of it.
+        char *rest = buf + n;
+        size_t rest_len = buf_len - (size_t)n;
+        // (A copy when the head was kept: a chunked body reuses that buffer.)
+        char *copy = NULL;
+        if (buf != data && rest_len) {
+            copy = malloc(rest_len);
+            memcpy(copy, rest, rest_len);
+            rest = copy;
+        }
         r->in_len = 0;
         r->state = R_BODY;
-        JSValue argv[4] = {JS_NewInt32(ctx, EV_HEAD), JS_NewInt32(ctx, status), JS_NewStringLen(ctx, msg, msg_len), flat};
-        if (!emit(i, 4, argv)) {
-            free(tail);
-            return;
+        r->collect = true;
+        r->col_ptr = NULL;
+        r->col_len = 0;
+        int st = r->remaining == 0 ? finish(i) : rest_len ? body(i, rest, rest_len) : GO_ON;
+        if (st == COMPLETE) {
+            const uint8_t *p = r->col_ptr ? r->col_ptr : r->col;
+            JSValue argv[5] = {JS_NewInt32(ctx, EV_COMPLETE), JS_NewInt32(ctx, r->status), r->status_text, r->flat,
+                               JS_NewArrayBufferCopy(ctx, p, r->col_len)};
+            r->collect = false;
+            r->col_ptr = NULL;
+            r->col_len = 0;
+            r->status_text = r->flat = JS_UNDEFINED;
+            if (emit(i, 5, argv))
+                req_free(i);
+        } else if (st == GO_ON && r->collect) {
+            flush_head(i);
         }
-        if (reqs[i]->remaining == 0) {
-            free(tail);
-            finish(i);
-            return;
-        }
-        if (rest)
-            body(i, tail, rest);
-        free(tail);
+        free(copy);
         return;
     }
 }
@@ -547,7 +692,7 @@ static void lost(uint32_t i) {
         return;
     }
     r->s = NULL;
-    fail(i, "ECONNRESET", "The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()");
+    fail(i, "ECONNRESET", FAIL_OTHER);
 }
 
 static struct us_socket_t *on_end(struct us_socket_t *s) {
@@ -582,16 +727,13 @@ static void connect_failed(uint32_t i, int dns_error, int code) {
     Req *r = reqs[i];
     r->s = NULL;
     r->cs = NULL;
-    char message[400];
     if (dns_error) {
-        snprintf(message, sizeof message, "getaddrinfo ENOTFOUND %s", r->host);
-        fail(i, "ENOTFOUND", message);
-    } else if (code == ECONNREFUSED || code == 0) {
-        fail(i, "ConnectionRefused", "Unable to connect. Is the computer able to access the url?");
-    } else {
-        snprintf(message, sizeof message, "connect %s", strerror(code));
-        fail(i, "ConnectionClosed", message);
+        fail(i, "ENOTFOUND", FAIL_DNS);
+        return;
     }
+    // (As Bun's: the code is the connect error's name.)
+    const char *name = code ? strerrorname_np(code) : NULL;
+    fail(i, name ? name : "ECONNREFUSED", FAIL_CONNECT);
 }
 
 static struct us_socket_t *on_connect_error(struct us_socket_t *s, int code) {
@@ -630,6 +772,8 @@ static void start(uint32_t i) {
         if (!strcmp(idle[k].key, r->key)) {
             struct us_socket_t *s = idle[k].s;
             idle[k] = idle[--nidle];
+            // (As Bun's: what the server sent since the loop last polled, or
+            // its closing the connection, makes it unusable.)
             if (us_socket_is_closed(s) || us_socket_queued_input(s) != LIBUS_QUEUED_INPUT_NONE) {
                 us_socket_close(s, 0, NULL);
                 continue;
@@ -674,11 +818,22 @@ static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, cons
         *owned = JS_ToCStringLen(ctx, len, v);
         return (const uint8_t *)*owned;
     }
-    size_t off = 0, bpe;
-    uint8_t *b = JS_GetArrayBuffer(ctx, len, v);
-    if (b)
+    // (Checked before asking: asking for the wrong kind throws, and making
+    // an error is costly.)
+    if (JS_IsArrayBuffer(v))
+        return JS_GetArrayBuffer(ctx, len, v);
+    int type = JS_GetTypedArrayType(v);
+    if (type < 0) {
+        *len = 0;
+        return NULL;
+    }
+    if (type == JS_TYPED_ARRAY_UINT8 || type == JS_TYPED_ARRAY_UINT8C) {
+        uint8_t *b = JS_GetUint8Array(ctx, len, v);
+        if (!b)
+            JS_FreeValue(ctx, JS_GetException(ctx));
         return b;
-    JS_FreeValue(ctx, JS_GetException(ctx));
+    }
+    size_t off = 0, bpe;
     JSValue ab = JS_GetTypedArrayBuffer(ctx, v, &off, len, &bpe);
     if (JS_IsException(ab)) {
         JS_FreeValue(ctx, JS_GetException(ctx));
@@ -686,33 +841,55 @@ static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, cons
         return NULL;
     }
     size_t total;
-    b = JS_GetArrayBuffer(ctx, &total, ab);
+    uint8_t *b = JS_GetArrayBuffer(ctx, &total, ab);
     JS_FreeValue(ctx, ab);
     return b ? b + off : NULL;
 }
 
-// fetchRequest(host, port, head, body, headOnly, callback): the request's
-// handle. `head` is the request line and headers (a string), `body` its
-// bytes or null.
+// fetchInit(handler): the function every request's events are handed to,
+// with its task.
+static JSValue js_fetch_init(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
+    handler = JS_DupValue(ctx, argv[0]);
+    return JS_UNDEFINED;
+}
+
+// fetchRequest(task, host, port, head, body, headOnly): the request's
+// handle. `head` is the request line and headers (a string or bytes), `body`
+// its bytes or null.
 static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
     int32_t port;
-    if (JS_ToInt32(ctx, &port, argv[1]))
+    if (JS_ToInt32(ctx, &port, argv[2]))
         return JS_EXCEPTION;
-    const char *host = JS_ToCString(ctx, argv[0]);
+    size_t host_len;
+    const char *host = JS_ToCStringLen(ctx, &host_len, argv[1]);
     if (!host)
         return JS_EXCEPTION;
     size_t hl, bl;
     const char *ho, *bo;
-    const uint8_t *head = bytes_of(ctx, argv[2], &hl, &ho);
-    const uint8_t *bodyb = bytes_of(ctx, argv[3], &bl, &bo);
+    const uint8_t *head = bytes_of(ctx, argv[3], &hl, &ho);
+    const uint8_t *bodyb = bytes_of(ctx, argv[4], &bl, &bo);
     uint32_t i = req_alloc();
     Req *r = reqs[i];
-    snprintf(r->host, sizeof r->host, "%s", host);
+    size_t n = host_len < sizeof r->host - 1 ? host_len : sizeof r->host - 1;
+    memcpy(r->host, host, n);
+    r->host[n] = 0;
     r->port = port;
-    snprintf(r->key, sizeof r->key, "%s:%d", host, port);
+    // The pool's key: host:port.
+    char digits[12];
+    int nd = 0;
+    for (uint32_t v = (uint32_t)port; nd == 0 || v; v /= 10)
+        digits[nd++] = (char)('0' + v % 10);
+    memcpy(r->key, r->host, n);
+    r->key[n] = ':';
+    for (int d = 0; d < nd; d++)
+        r->key[n + 1 + d] = digits[nd - 1 - d];
+    r->key[n + 1 + nd] = 0;
     JS_FreeCString(ctx, host);
     r->out_len = hl + bl;
-    r->out = malloc(r->out_len ? r->out_len : 1);
+    if (!reserve((uint8_t **)&r->out, &r->out_cap, r->out_len ? r->out_len : 1)) {
+        req_free(i);
+        return JS_ThrowOutOfMemory(ctx);
+    }
     if (hl)
         memcpy(r->out, head, hl);
     if (bl)
@@ -721,8 +898,8 @@ static JSValue js_fetch_request(JSContext *ctx, JSValueConst this_val, int argc,
         JS_FreeCString(ctx, ho);
     if (bo)
         JS_FreeCString(ctx, bo);
-    r->head_only = JS_ToBool(ctx, argv[4]);
-    r->cb = JS_DupValue(ctx, argv[5]);
+    r->task = JS_DupValue(ctx, argv[0]);
+    r->head_only = JS_ToBool(ctx, argv[5]);
     r->state = R_CONNECT;
     double h = handle_of(i);
     start(i);
@@ -769,6 +946,7 @@ static JSValue js_fetch_pause(JSContext *ctx, JSValueConst this_val, int argc, J
 }
 
 const JSCFunctionListEntry beyond_client_functions[] = {
+    JS_CFUNC_DEF("fetchInit", 1, js_fetch_init),
     JS_CFUNC_DEF("fetchRequest", 6, js_fetch_request),
     JS_CFUNC_DEF("fetchAbort", 1, js_fetch_abort),
     JS_CFUNC_DEF("fetchPause", 2, js_fetch_pause),

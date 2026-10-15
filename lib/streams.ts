@@ -699,6 +699,13 @@ function numReadIntoRequests(stream: ReadableStream<any>): number {
   return reader instanceof ReadableStreamBYOBReader ? reader._readIntoRequests.length : 0;
 }
 
+/** The error getting a reader (or writer) of a locked stream throws, Bun's. */
+function lockedError(kind: string): TypeError {
+  const e = new TypeError(`Invalid state: ${kind} is locked`);
+  (e as any).code = "ERR_INVALID_STATE";
+  return e;
+}
+
 export function readableStreamCancel(stream: ReadableStream<any>, reason: any): Promise<void> {
   stream._disturbed = true;
   if (stream._state === "closed") return resolved();
@@ -722,7 +729,7 @@ export class ReadableStreamDefaultReader<R = any> {
 
   constructor(stream: ReadableStream<R>) {
     if (!(stream instanceof ReadableStream)) throw new TypeError("A reader needs a ReadableStream");
-    if (stream._reader !== undefined) throw new TypeError("The stream is locked to another reader");
+    if (stream._reader !== undefined) throw lockedError("ReadableStream");
     this._closed = deferred<undefined>();
     this._stream = stream;
     stream._reader = this;
@@ -1173,7 +1180,7 @@ export class ReadableStreamBYOBReader {
 
   constructor(stream: ReadableStream<any>) {
     if (!isReadableStream(stream)) throw new TypeError("A reader needs a ReadableStream");
-    if (stream._reader !== undefined) throw new TypeError("The stream is locked to another reader");
+    if (stream._reader !== undefined) throw lockedError("ReadableStream");
     if (!(stream._controller instanceof ReadableByteStreamController)) {
       throw new TypeError("Only byte streams have BYOB readers");
     }
@@ -2265,7 +2272,7 @@ export class WritableStreamDefaultWriter<W = any> {
 
   constructor(stream: WritableStream<W>) {
     if (!(stream instanceof WritableStream)) throw new TypeError("A writer needs a WritableStream");
-    if (stream._writer !== undefined) throw new TypeError("The stream is locked to another writer");
+    if (stream._writer !== undefined) throw lockedError("WritableStream");
     this._stream = stream;
     stream._writer = this;
     this._ready = deferred<undefined>();

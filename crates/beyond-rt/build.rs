@@ -31,6 +31,10 @@ fn main() {
         .include(vendor.join("picohttpparser"))
         .include(vendor.join("zstd"))
         .include(&quickjs);
+    // (x86-64-v2, as Bun's baseline builds: picohttpparser scans with SSE4.2.)
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64") {
+        c.flag("-msse4.2");
+    }
     c.file(vendor.join("picohttpparser/picohttpparser.c"));
     c.file(vendor.join("zstd/zstddeclib.c"));
     for f in ["bsd.c", "context.c", "loop.c", "socket.c", "udp.c", "eventing/epoll_kqueue.c"] {

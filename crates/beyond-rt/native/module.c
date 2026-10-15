@@ -166,6 +166,19 @@ static JSValue js_now(JSContext *c, JSValueConst this_val, int argc, JSValueCons
     return JS_NewFloat64(c, beyond_rt_now_ms());
 }
 
+// promiseNew(): a pending promise that only promiseSettle settles (it has
+// no resolving functions).
+static JSValue js_promise_new(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return JS_NewPendingPromise(c);
+}
+
+// promiseSettle(promise, value, rejected): as its resolve function (its
+// reject function if `rejected`) would, once.
+static JSValue js_promise_settle(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JS_SettlePromise(c, argv[0], argv[1], JS_ToBool(c, argv[2]));
+    return JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("setTimer", 3, js_set_timer),
     JS_CFUNC_DEF("clearTimer", 1, js_clear_timer),
@@ -173,6 +186,8 @@ static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("onTimer", 1, js_on_timer),
     JS_CFUNC_DEF("now", 0, js_now),
     JS_CFUNC_DEF("reportError", 1, js_report_error),
+    JS_CFUNC_DEF("promiseNew", 0, js_promise_new),
+    JS_CFUNC_DEF("promiseSettle", 3, js_promise_settle),
 };
 
 static int module_init(JSContext *c, JSModuleDef *m) {

@@ -27,3 +27,32 @@ try { await new Response("plain").formData(); } catch (e: any) { console.log(e.n
 console.log(JSON.stringify(fd2.getAll("name")), fd2.has("bin"), (fd2.get("bin") as File).name);
 fd2.set("name", "Alice"); fd2.delete("note"); console.log([...fd2.keys()].join());
 }
+
+// Headers as Bun shows them (known names, set-cookie, then the others), and
+// requests and responses with used bodies.
+const h = new Headers({ b: "1", A: "2", "set-cookie": "x", c: "3", "Content-Type": "text/x" });
+h.append("b", "4");
+h.append("Set-Cookie", "y");
+h.append("accept", "*/*");
+console.log(h);
+console.log(h.toJSON());
+console.log(JSON.stringify(h));
+h.delete("b");
+h.set("a", "9");
+h.append("b", "5");
+console.log(h);
+console.log(new Headers());
+console.log(new Headers([["x-one", "1"]]));
+console.log(new Response(null));
+console.log(new Response("abc"));
+const r = new Response("abc"); await r.text(); console.log(r);
+console.log(new Response(null, { headers: { z: "1", a: "2" }, status: 201, statusText: "Made" }));
+console.log(new Request("http://x/"));
+console.log(new Request("http://x/", { method: "POST", body: "hey" }));
+const q = new Request("http://x/", { method: "POST", body: "hey" }); await q.text(); console.log(q);
+console.log(new Request("http://x/", { headers: { a: "1" } }));
+console.log([new Response("x")]);
+console.log({ r: new Response("x") });
+const k = new Headers(); k.append("Cookie", "a=1"); k.append("cookie", "b=2"); k.append("x", "1"); k.append("x", "2");
+console.log(k.get("cookie"), k.get("x"), [...k], k);
+console.log(new Headers({ "10": "a", z: "b", "2": "c" }).toJSON());
