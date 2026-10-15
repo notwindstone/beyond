@@ -9,10 +9,13 @@
 // request the server answers.
 
 import { decodeUtf8, encodeUtf8 } from "beyond:native";
+import { Blob } from "./blob.ts";
+import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
+import { URLSearchParams } from "./url.ts";
 
 export type HeadersInit = Headers | [string, string][] | Record<string, string>;
-export type BodyInit = string | ArrayBuffer | ArrayBufferView | null;
+export type BodyInit = string | ArrayBuffer | ArrayBufferView | Blob | FormData | URLSearchParams | null;
 
 /** Whether the character code `c` may be in an HTTP token (a header name). */
 function tokenChar(c: number): boolean {
@@ -198,17 +201,40 @@ export class Headers {
 /** A body as stored: a string, the bytes, or none. */
 type Stored = string | ArrayBuffer | null;
 
+// The content type the last body `store` took has, if any (set by `store`).
+let extractedType: string | null = null;
+
+/** The bytes of a Uint8Array, as an ArrayBuffer (the same one if it is whole). */
+function bufferOf(b: Uint8Array): ArrayBuffer {
+  return b.byteOffset === 0 && b.byteLength === b.buffer.byteLength ? (b.buffer as ArrayBuffer) : (b.slice().buffer as ArrayBuffer);
+}
+
+/**
+ * A body as stored, from what a Request or Response is made with; its
+ * content type (a Blob's, a form's) in `extractedType`.
+ */
 function store(body: BodyInit | undefined): Stored {
+  extractedType = null;
   if (body === undefined || body === null) return null;
   if (typeof body === "string") return body;
   if (body instanceof ArrayBuffer) return body;
   if (ArrayBuffer.isView(body)) {
     return (body.buffer as ArrayBuffer).slice(body.byteOffset, body.byteOffset + body.byteLength);
   }
-  if (typeof body === "object" && body !== null && typeof (body as any).toString === "function" && body.constructor?.name === "URLSearchParams") {
-    return String(body);
+  if (body instanceof Blob) {
+    if (body.type !== "") extractedType = body.type;
+    return bufferOf(body._bytes);
   }
-  throw new TypeError("Unsupported body type (streams, Blob and FormData are not supported yet)");
+  if (body instanceof FormData) {
+    const [bytes, type] = encodeMultipart(body);
+    extractedType = type;
+    return bufferOf(bytes);
+  }
+  if (body instanceof URLSearchParams) {
+    extractedType = "application/x-www-form-urlencoded;charset=UTF-8";
+    return body.toString();
+  }
+  throw new TypeError("Unsupported body type (streams are not supported yet)");
 }
 
 /** A stored body's size in bytes. */
@@ -260,6 +286,21 @@ class Body {
   async bytes(): Promise<Uint8Array> {
     return new Uint8Array(await this.arrayBuffer());
   }
+
+  /** The body's content type (overridden: Request's and Response's headers). */
+  _mime(): string | null {
+    return null;
+  }
+
+  async blob(): Promise<Blob> {
+    const type = this._mime() ?? "";
+    return Blob._of(new Uint8Array(await this.arrayBuffer()), type.toLowerCase());
+  }
+
+  async formData(): Promise<FormData> {
+    const type = this._mime();
+    return parseForm(new Uint8Array(await this.arrayBuffer()), type);
+  }
 }
 
 export interface ResponseInit {
@@ -297,8 +338,22 @@ export class Response extends Body {
     }
     this.status = status;
     this.statusText = statusText;
-    if (headers !== undefined) this._headers = new Headers(headers);
-    if (typeof this._body === "string") this._defaultType = TEXT;
+    const type = extractedType;
+    if (headers !== undefined) {
+      const h = new Headers(headers);
+      if (type !== null && !h.has("content-type")) h.append("content-type", type);
+      this._headers = h;
+    } else if (type !== null) {
+      this._contentType = type;
+    } else if (typeof this._body === "string") {
+      this._defaultType = TEXT;
+    }
+  }
+
+  _mime(): string | null {
+    const h = this._headers;
+    if (h !== null) return h.get("content-type") ?? this._defaultType;
+    return this._contentType ?? this._defaultType;
   }
 
   get headers(): Headers {
@@ -409,6 +464,7 @@ function normalizeMethod(method: string): string {
 /** The body of `new Request(input, init)`. */
 function requestBody(input: string | Request, init: RequestInit | undefined): Stored {
   if (init !== undefined && init.body !== undefined) return store(init.body);
+  extractedType = null;
   return input instanceof Request ? input._body : null;
 }
 
@@ -426,8 +482,13 @@ export class Request extends Body {
     let method = from !== null ? from.method : "GET";
     if (init !== undefined && init.method !== undefined) method = normalizeMethod(init.method);
     this.method = method;
+    const type = extractedType;
     if (init !== undefined && init.headers !== undefined) this._headers = new Headers(init.headers);
     else if (from !== null) this._headers = new Headers(from.headers);
+    if (type !== null && init !== undefined && init.body !== undefined) {
+      if (this._headers === null) this._headers = new Headers();
+      if (!this._headers.has("content-type")) this._headers.append("content-type", type);
+    }
     if ((method === "GET" || method === "HEAD") && this._body !== null) {
       throw new TypeError("Request with GET/HEAD method cannot have body.");
     }
@@ -440,6 +501,10 @@ export class Request extends Body {
     if (body !== undefined) r._body = body;
     r._flat = flat;
     return r;
+  }
+
+  _mime(): string | null {
+    return this.headers.get("content-type");
   }
 
   get headers(): Headers {

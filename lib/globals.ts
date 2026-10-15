@@ -3,12 +3,14 @@
 // performance.
 
 import { now } from "beyond:native";
+import { Blob, File } from "./blob.ts";
 import { structuredClone } from "./clone.ts";
 import { console } from "./console.ts";
 import { Crypto, crypto } from "./crypto.ts";
 import { TextDecoder, TextEncoder } from "./encoding.ts";
 import { AbortController, AbortSignal, CustomEvent, Event, EventTarget, reportError } from "./events.ts";
 import { Headers, Request, Response } from "./fetch.ts";
+import { FormData } from "./formdata.ts";
 import { inspect } from "./inspect.ts";
 import { serve } from "./serve.ts";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "./timers.ts";
@@ -40,6 +42,9 @@ define("crypto", crypto);
 define("structuredClone", structuredClone);
 define("URL", URL);
 define("URLSearchParams", URLSearchParams);
+define("Blob", Blob);
+define("File", File);
+define("FormData", FormData);
 define("Headers", Headers);
 define("Request", Request);
 define("Response", Response);

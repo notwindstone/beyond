@@ -1,0 +1,32 @@
+Blob (3 bytes)
+Blob (1 bytes) {
+  type: "text/plain"
+}
+File (3 bytes) {
+  name: "a.txt",
+  type: "text/plain;charset=utf-8",
+  lastModified: 5
+}
+[
+  Blob (0 KB)
+]
+FormData {
+  "a": "1",
+  "f": File (2 bytes) {
+    name: "z.bin"
+  },
+}
+image/png
+multipart/form-data; boundary=
+application/x-www-form-urlencoded;charset=UTF-8
+hey text/plain;charset=utf-8
+name "Kei"
+note "line1\r\nline2 \"q\""
+file hi.txt text/plain;charset=utf-8 11 "hello world"
+bin b.bin application/octet-stream 4 "\u0000\u0001\u0002�"
+a=1&b= &c=
+true Kei
+text/x 3 abc b 3
+TypeError
+["Kei"] true b.bin
+name,file,bin

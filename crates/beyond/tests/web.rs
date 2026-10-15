@@ -41,6 +41,14 @@ fn console() {
 }
 
 #[test]
+fn body() {
+    // Blob, File, FormData, and Request and Response with them.
+    let (out, err, ok) = run("body");
+    assert_eq!(out, expected("body"));
+    assert!(ok, "{err}");
+}
+
+#[test]
 fn url() {
     let (out, err, ok) = run("url");
     assert_eq!(out, expected("url"));

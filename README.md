@@ -53,6 +53,9 @@ networking code uses its extensions) and zlib.
   on Bun's uSockets and uWebSockets, keep-alive and pipelining included. The
   `fetch` handler returns a `Response` or a promise of one; request bodies
   are read whole before it runs. `server.port`, `server.url`, `server.stop()`.
+- `Blob`, `File` and `FormData`; bodies of them, of strings, bytes and
+  `URLSearchParams` (multipart/form-data written and read, urlencoded
+  read: `formData()`, `blob()`), with their content types as Bun gives them.
 - `Headers`, `Request` and `Response` as the Fetch standard has them, with
   string and byte bodies (`text`, `json`, `arrayBuffer`, `bytes`;
   `Response.json`, `Response.redirect`, `Response.error`). Written in
@@ -90,8 +93,8 @@ networking code uses its extensions) and zlib.
 The tests (`cargo test`) run programs whose output must be Bun's, the WPT
 URL data, and a server answering over TCP.
 
-Not yet: TLS, HTTP/2, WebSockets, streaming bodies, `Blob` and `FormData`,
-`fetch` (the client), `crypto.subtle`; errors print without Bun's source
+Not yet: TLS, HTTP/2, WebSockets, streams (and streaming bodies), `fetch`
+(the client), `crypto.subtle`; errors print without Bun's source
 excerpt, and their stacks' lines are the bundle's.
 
 ## Performance
