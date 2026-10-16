@@ -235,6 +235,21 @@ response its middleware makes again with its headers copied, and its
 router's `match`, a function using `this` outside a class, which stays
 interpreted.
 
+The same routes in Elysia 2 (bench/elysia, `bench/run.sh elysia`): one
+bundle built ahead of time with Elysia's AOT plugin, on Beyond and on Bun,
+and on Bun the app as written too (Elysia composing its handlers with
+`new Function` at run time):
+
+| | text | JSON | `/users/:id` | memory |
+|---|---|---|---|---|
+| Beyond | 37,068 | 49,968 | 40,245 | 30 MB |
+| Bun | 75,688 | 65,062 | 62,370 | 31 MB |
+| Bun (run-time handlers) | 71,088 | 68,061 | 66,810 | 36 MB |
+
+Beyond answers 49-77% as many requests a second as Bun; much of Elysia
+still runs interpreted (recursive functions without a return type,
+`arguments`, class expressions at module level, `Error` subclasses).
+
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
 read with `text()` (bench/fetch.ts), three rounds a run, two runs each:

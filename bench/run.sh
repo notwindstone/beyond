@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Beyond against Bun, runs alternated: the server (`oha -c 50` for 10 s, the
 # text and the JSON program), JSON of typed (`aot type`) and plain objects
-# from the server, a Hono app (bench/hono), the fetch() client (1, 10 and 50
+# from the server, a Hono app (bench/hono), an Elysia app (bench/elysia),
+# the fetch() client (1, 10 and 50
 # in flight, against a Beyond server) and URL parsing. Needs bun and oha on
 # PATH, and Beyond built (cargo build --release).
 #
-#   bench/run.sh [serve|json|hono|fetch|url]...
+#   bench/run.sh [serve|json|hono|elysia|fetch|url]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
 beyond=target/release/beyond
@@ -97,6 +98,26 @@ hono() {
     done
   done
   rm -f bench/hono/app.bun.ts
+}
+
+# An Elysia 2 app (bench/elysia), built ahead of time with Elysia's AOT
+# plugin (bun build.ts): the same bundle on Beyond and on Bun, and on Bun
+# the app itself as well (Elysia composing its handlers at run time).
+elysia() {
+  [ -d bench/elysia/node_modules ] || (cd bench/elysia && bun install > /dev/null)
+  (cd bench/elysia && bun build.ts > /dev/null)
+  "$beyond" build bench/elysia/dist/app.js -o "$work/elysia" > /dev/null
+  for round in 1 2; do
+    for who in beyond bun bun-jit; do
+      case $who in
+        beyond) serving "$work/elysia" ;;
+        bun) serving bun bench/elysia/dist/app.js ;;
+        bun-jit) serving bun bench/elysia/app.ts ;;
+      esac
+      for path in / /json /users/42; do measure "elysia $path" "$who" "$path"; done
+      stop
+    done
+  done
 }
 
 # Runs a command; its output on one line, then its peak memory.
