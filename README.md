@@ -53,7 +53,9 @@ networking code uses its extensions), zlib, brotli's decoder
   waits on the loop. A promise rejected with no handler once the jobs are
   done is reported as an uncaught error, and the program exits with 1, as
   Bun's does.
-- `Beyond.serve({ port, hostname, fetch, error })`, as `Bun.serve`: HTTP/1.1
+- `Bun` is `Beyond` (the same object), so code written for Bun's API runs
+  as it is: `serve`, `sleep`, `randomUUIDv7`, `gc`, `inspect`, `version`.
+- `Beyond.serve({ port, hostname, fetch, routes, error })`, as `Bun.serve`: HTTP/1.1
   on Bun's uSockets and uWebSockets, keep-alive and pipelining included. The
   `fetch` handler returns a `Response` or a promise of one. A request's
   body that comes with its head is handed to it whole; one still coming
@@ -64,7 +66,14 @@ networking code uses its extensions), zlib, brotli's decoder
   room (uWebSockets' writable callbacks, as Bun's sink does); a stream that
   fails midway closes the connection. `server.port`, `server.url`,
   `server.stop(closeActiveConnections)` (idle connections closed, the
-  others once answered, or all of them).
+  others once answered, or all of them), a HEAD request answered with the
+  response's length and no body, `server.reload(options)`,
+  `server.pendingRequests`. `routes`, as Bun's: exact paths before
+  `:param` patterns before `*` ones (params percent-decoded, on
+  `request.params`), a handler or a `Response` per path or per method (a
+  method a path does not handle goes to `fetch`, HEAD to its GET); a
+  `Response` is sent as it is to every method, with Bun's etag (the
+  xxHash64 of its body) and a 304 for a matching `If-None-Match`.
 - `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
   picohttpparser), over TLS for `https:` (OpenSSL, on the socket through
   memory BIOs; Bun's bundled Mozilla root certificates trusted, with
@@ -135,6 +144,13 @@ networking code uses its extensions), zlib, brotli's decoder
 The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT
 URL data and streams tests, a server answering over TCP, and `fetch()`
 against a server of the test's own.
+
+Elysia 2 (`bench/elysia`) runs on Beyond: its AOT plugin for `Bun.build`
+composes the handlers at build time (`bun build.ts`), so the bundle makes no
+function with `new Function` at run time, and `beyond build dist/app.js`
+compiles it; Elysia takes its Bun adapter (`Bun.serve` with `routes` and
+`reload`). Its responses are Bun's but for the order and case of some
+header names.
 
 Not yet: TLS for `Beyond.serve`, client certificates and
 `checkServerIdentity` for `fetch`, HTTP/2, WebSockets, `crypto.subtle`,

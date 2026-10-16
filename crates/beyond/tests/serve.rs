@@ -194,3 +194,72 @@ fn serve() {
     assert!(stderr.contains("Error: stream broke"), "{stderr}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `routes` (tests/serve/routes.ts): what Bun 1.4.3 answers.
+#[test]
+fn routes() {
+    let dir = common::tempdir("serve-routes");
+    let exe = dir.join("routes");
+    common::build(&common::test_file("serve/routes.ts"), &exe);
+
+    let mut child = Command::new(&exe).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let port: u16 = line.trim().parse().expect("the port");
+    let body = |path: &str| get(port, path).1;
+    let method = |m: &str, path: &str| {
+        request(port, &format!("{m} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"))
+    };
+
+    // A static Response: as it is, with its etag (xxHash64), to any method.
+    let (head, b) = get(port, "/static");
+    assert_eq!(b, "static body");
+    assert_eq!(head[1..4], ["content-type: text/plain;charset=utf-8", "x-s: 1", "etag: \"47d1e6314ba2bfdd\""], "{head:?}");
+    assert_eq!(method("POST", "/static").1, "static body");
+    let (head, b) = method("HEAD", "/static");
+    assert!(head.contains(&"content-length: 11".into()), "{head:?}");
+    assert_eq!(b, "");
+    let (head, b) = request(
+        port,
+        "GET /static HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"47d1e6314ba2bfdd\"\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(head[0], "HTTP/1.1 304 Not Modified");
+    assert_eq!(b, "");
+
+    // Exact paths, then parameters, then `*`; no trailing slash folded.
+    assert_eq!(body("/users/42"), r#"{"params":{"id":"42"}}"#);
+    assert_eq!(body("/users/42?x=1"), r#"{"params":{"id":"42"}}"#);
+    assert_eq!(body("/users/me"), "me");
+    assert_eq!(body("/users/"), "fetch /users/ GET undefined");
+    assert_eq!(body("/users/42/extra"), "fetch /users/42/extra GET undefined");
+    assert_eq!(body("/files"), "fetch /files GET undefined");
+    assert_eq!(body("/files/"), "files {}");
+    assert_eq!(body("/files/a/b"), "files {}");
+    assert_eq!(body("/a/1/b/2"), r#"{"x":"1","y":"2"}"#);
+    assert_eq!(body("/enc/a%20b"), r#"{"name":"a b"}"#);
+    assert_eq!(body("/static/"), "fetch /static/ GET undefined");
+
+    // By method: the others go to `fetch`, HEAD to GET.
+    assert_eq!(body("/methods"), "get");
+    assert_eq!(method("POST", "/methods").1, "post static");
+    assert_eq!(method("PUT", "/methods").1, "fetch /methods PUT undefined");
+    assert!(method("HEAD", "/methods").0.contains(&"content-length: 3".into()));
+
+    // `error` for what a route throws; async handlers.
+    let (head, b) = get(port, "/throws");
+    assert_eq!(head[0], "HTTP/1.1 500 Internal Server Error");
+    assert_eq!(b, "error: route boom");
+    assert_eq!(body("/async"), "async");
+    assert_eq!(body("/pending"), "1");
+
+    // reload: new routes and fetch.
+    assert_eq!(body("/reload"), "reloaded");
+    assert_eq!(body("/reloaded"), "new");
+    assert_eq!(body("/static"), "new fetch");
+
+    assert_eq!(body("/stop"), "new fetch");
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

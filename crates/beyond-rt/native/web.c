@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <string.h>
 #include <sys/random.h>
 #include <unistd.h>
@@ -179,6 +180,125 @@ static JSValue js_random_uuid(JSContext *c, JSValueConst this_val, int argc, JSV
     return JS_NewStringLen(c, s, sizeof s);
 }
 
+// randomUUIDv7(ms): a version 7 UUID of Unix time `ms` (its first 48 bits),
+// the rest random, as Bun.randomUUIDv7's.
+static JSValue js_random_uuid_v7(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    static const char hex[] = "0123456789abcdef";
+    uint8_t b[16];
+    char s[36];
+    double ms;
+    if (JS_ToFloat64(c, &ms, argv[0]))
+        return JS_EXCEPTION;
+    if (random_bytes(b, sizeof b))
+        return JS_ThrowInternalError(c, "getrandom failed: %s", strerror(errno));
+    uint64_t t = ms > 0 ? (uint64_t)ms : 0;
+    for (int i = 0; i < 6; i++)
+        b[i] = (uint8_t)(t >> (40 - 8 * i));
+    b[6] = (b[6] & 0x0f) | 0x70;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    for (int i = 0, j = 0; i < 16; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10)
+            s[j++] = '-';
+        s[j++] = hex[b[i] >> 4];
+        s[j++] = hex[b[i] & 15];
+    }
+    return JS_NewStringLen(c, s, sizeof s);
+}
+
+// ---- xxHash64 (seed 0): the etags of static routes, as Bun's ----
+
+#define XXH_P1 0x9E3779B185EBCA87ULL
+#define XXH_P2 0xC2B2AE3D27D4EB4FULL
+#define XXH_P3 0x165667B19E3779F9ULL
+#define XXH_P4 0x85EBCA77C2B2AE63ULL
+#define XXH_P5 0x27D4EB2F165667C5ULL
+
+static inline uint64_t xxh_rotl(uint64_t x, int r) { return (x << r) | (x >> (64 - r)); }
+static inline uint64_t xxh_read64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+static inline uint32_t xxh_read32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static inline uint64_t xxh_round(uint64_t acc, uint64_t in) {
+    return xxh_rotl(acc + in * XXH_P2, 31) * XXH_P1;
+}
+static inline uint64_t xxh_merge(uint64_t acc, uint64_t v) {
+    return (acc ^ xxh_round(0, v)) * XXH_P1 + XXH_P4;
+}
+
+static uint64_t xxh64(const uint8_t *p, size_t len) {
+    const uint8_t *end = p + len;
+    uint64_t h;
+    if (len >= 32) {
+        uint64_t v1 = XXH_P1 + XXH_P2, v2 = XXH_P2, v3 = 0, v4 = -XXH_P1;
+        do {
+            v1 = xxh_round(v1, xxh_read64(p));
+            v2 = xxh_round(v2, xxh_read64(p + 8));
+            v3 = xxh_round(v3, xxh_read64(p + 16));
+            v4 = xxh_round(v4, xxh_read64(p + 24));
+            p += 32;
+        } while (p + 32 <= end);
+        h = xxh_rotl(v1, 1) + xxh_rotl(v2, 7) + xxh_rotl(v3, 12) + xxh_rotl(v4, 18);
+        h = xxh_merge(h, v1);
+        h = xxh_merge(h, v2);
+        h = xxh_merge(h, v3);
+        h = xxh_merge(h, v4);
+    } else {
+        h = XXH_P5;
+    }
+    h += len;
+    for (; p + 8 <= end; p += 8)
+        h = xxh_rotl(h ^ xxh_round(0, xxh_read64(p)), 27) * XXH_P1 + XXH_P4;
+    if (p + 4 <= end) {
+        h = xxh_rotl(h ^ (uint64_t)xxh_read32(p) * XXH_P1, 23) * XXH_P2 + XXH_P3;
+        p += 4;
+    }
+    for (; p < end; p++)
+        h = xxh_rotl(h ^ *p * XXH_P5, 11) * XXH_P1;
+    h ^= h >> 33;
+    h *= XXH_P2;
+    h ^= h >> 29;
+    h *= XXH_P3;
+    h ^= h >> 32;
+    return h;
+}
+
+// xxh64Hex(value): the xxHash64 of a string's UTF-8 or of bytes (an
+// ArrayBuffer or a view), in lowercase hex.
+static JSValue js_xxh64_hex(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    char out[17];
+    uint64_t h;
+    if (JS_IsString(argv[0])) {
+        size_t len;
+        const char *s = JS_ToCStringLen(c, &len, argv[0]);
+        if (!s)
+            return JS_EXCEPTION;
+        h = xxh64((const uint8_t *)s, len);
+        JS_FreeCString(c, s);
+    } else {
+        size_t len = 0, off = 0, bpe;
+        uint8_t *b = JS_GetArrayBuffer(c, &len, argv[0]);
+        if (!b) {
+            JS_FreeValue(c, JS_GetException(c));
+            JSValue ab = JS_GetTypedArrayBuffer(c, argv[0], &off, &len, &bpe);
+            if (JS_IsException(ab))
+                return ab;
+            size_t total;
+            b = JS_GetArrayBuffer(c, &total, ab);
+            JS_FreeValue(c, ab);
+            if (!b)
+                return JS_EXCEPTION;
+            b += off;
+        }
+        h = xxh64(b, len);
+    }
+    snprintf(out, sizeof out, "%" PRIx64, h);
+    return JS_NewString(c, out);
+}
+
+// gc(): a full collection.
+static JSValue js_gc(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JS_RunGC(JS_GetRuntime(c));
+    return JS_UNDEFINED;
+}
+
 // ---- The console's output ----
 
 // Standard output is buffered (flushed before the event loop waits, before
@@ -246,5 +366,8 @@ const JSCFunctionListEntry beyond_web_functions[] = {
     JS_CFUNC_DEF("decodeUtf8", 2, js_decode_utf8),
     JS_CFUNC_DEF("randomFill", 1, js_random_fill),
     JS_CFUNC_DEF("randomUUID", 0, js_random_uuid),
+    JS_CFUNC_DEF("randomUUIDv7", 1, js_random_uuid_v7),
+    JS_CFUNC_DEF("xxh64Hex", 1, js_xxh64_hex),
+    JS_CFUNC_DEF("gc", 0, js_gc),
 };
 const int beyond_web_function_count = sizeof beyond_web_functions / sizeof *beyond_web_functions;

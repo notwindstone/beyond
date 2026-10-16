@@ -6,6 +6,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -82,6 +83,7 @@ typedef struct {
     // A body still arriving once the handler was called: handed to
     // `incoming` (JavaScript's), unless the program dropped it.
     bool body_open, body_dropped;
+    bool head; // a HEAD request: the response's length, without its body
     JSValue incoming;
     uint32_t next_free;
 } Slot;
@@ -408,6 +410,7 @@ static void on_request(uws_res_t *res, uws_req_t *req, void *user) {
     s->server = user;
     const char *p;
     size_t n = beyond_req_method(req, &p);
+    s->head = n == 4 && memcmp(p, "HEAD", 4) == 0;
     s->args[0] = beyond_common_string(ctx, p, n);
     HeaderSink h;
     h.ctx = ctx;
@@ -576,6 +579,20 @@ static const uint8_t *bytes_of(JSContext *ctx, JSValueConst v, size_t *len, cons
     return b ? b + off : NULL;
 }
 
+// Ends the response with body `b`: for a HEAD request, its length only (as
+// Bun's server answers HEAD).
+static void end_with(Reply *r, const char *b, size_t bl) {
+    uws_res_t *res = r->s->res;
+    if (r->s->head) {
+        char len[24];
+        int n = snprintf(len, sizeof len, "%zu", bl);
+        uws_res_write_header(0, res, "Content-Length", 14, len, (size_t)n);
+        uws_res_end_without_body(0, res, false);
+        return;
+    }
+    uws_res_end(0, res, b, bl, false);
+}
+
 static void write_reply(void *data) {
     Reply *r = data;
     JSContext *ctx = r->ctx;
@@ -585,18 +602,18 @@ static void write_reply(void *data) {
     if (JS_IsString(r->body)) {
         size_t bl;
         const char *b = JS_ToCStringLen(ctx, &bl, r->body);
-        uws_res_end(0, res, b ? b : "", b ? bl : 0, false);
+        end_with(r, b ? b : "", b ? bl : 0);
         JS_FreeCString(ctx, b);
     } else if (JS_IsUndefined(r->body) || JS_IsNull(r->body)) {
         if (r->status == 204 || r->status == 304 || (r->status >= 100 && r->status < 200))
             uws_res_end_without_body(0, res, false);
         else
-            uws_res_end(0, res, "", 0, false);
+            end_with(r, "", 0);
     } else {
         size_t bl = 0;
         const char *owned;
         const uint8_t *b = bytes_of(ctx, r->body, &bl, &owned);
-        uws_res_end(0, res, b ? (const char *)b : "", b ? bl : 0, false);
+        end_with(r, b ? (const char *)b : "", b ? bl : 0);
     }
     r->ok = true;
 }
