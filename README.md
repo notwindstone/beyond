@@ -242,14 +242,18 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 59,081 | 53,675 | 48,790 | 31 MB |
-| Bun | 73,510 | 67,770 | 64,916 | 32 MB |
-| Bun (run-time handlers) | 78,850 | 72,498 | 67,949 | 37 MB |
+| Beyond | 59,060 | 54,021 | 49,520 | 31 MB |
+| Bun | 69,997 | 58,748 | 49,353 | 32 MB |
+| Bun (run-time handlers) | 63,955 | 63,462 | 57,476 | 37 MB |
 
-Beyond answers 75-80% as many requests a second as Bun. All of Elysia is
-native but for four functions; one of them makes the class of each
-request's context (`class Context extends Base` inside a function, which
-stays interpreted, so each request constructs it in the interpreter).
+Beyond answers 84-100% as many requests a second as Bun (this machine's
+results vary by 10-20% from run to run, for Bun as for Beyond).
+All of Elysia is native but one function (`tee`, a computed method in an
+object literal). The class of each request's context (`class Context
+extends Base`, made in a function) is native since classes inside
+functions compile: the same bundle with that function kept interpreted,
+run alternately with it, answers 52,300 and 44,200 requests a second
+(text, `/users/:id`) where it answers 63,300 and 48,700.
 
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
