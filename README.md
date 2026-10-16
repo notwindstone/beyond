@@ -242,13 +242,14 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 37,068 | 49,968 | 40,245 | 30 MB |
-| Bun | 75,688 | 65,062 | 62,370 | 31 MB |
-| Bun (run-time handlers) | 71,088 | 68,061 | 66,810 | 36 MB |
+| Beyond | 59,081 | 53,675 | 48,790 | 31 MB |
+| Bun | 73,510 | 67,770 | 64,916 | 32 MB |
+| Bun (run-time handlers) | 78,850 | 72,498 | 67,949 | 37 MB |
 
-Beyond answers 49-77% as many requests a second as Bun; much of Elysia
-still runs interpreted (recursive functions without a return type,
-`arguments`, class expressions at module level, `Error` subclasses).
+Beyond answers 75-80% as many requests a second as Bun. All of Elysia is
+native but for four functions; one of them makes the class of each
+request's context (`class Context extends Base` inside a function, which
+stays interpreted, so each request constructs it in the interpreter).
 
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
