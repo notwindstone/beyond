@@ -68,5 +68,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", vendor.join("uws-capi").display());
     println!("cargo:rerun-if-changed={}", vendor.join("picohttpparser").display());
     println!("cargo:rerun-if-changed={}", vendor.join("zstd").display());
+    // (The engine's header decides the JSValue representation the bindings
+    // are compiled for.)
+    println!("cargo:rerun-if-changed={}", quickjs.join("quickjs.h").display());
     println!("cargo:rerun-if-env-changed=BEYOND_QUICKJS_DIR");
 }
