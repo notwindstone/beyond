@@ -276,3 +276,53 @@ Decisions for you:
     `then` and flag getters in the middle of a run;
   - for Bet C, a fuzzer that forces exits.
 - **Bun's rule:** no measured case may regress.
+
+## 6. Progress
+
+Done (October 2026): the quick wins and Bet A. Instructions per request
+under callgrind, steady state, LLVM backend:
+
+| | Hono | Elysia |
+|---|---:|---:|
+| before | 83,454 | 50,825 |
+| uWS request no longer zeroed; request fields one string, split on use | 76,077 | |
+| Bet A (`0012`), with the above | 67,008 | 43,215 |
+| Bun 1.4.3 | 43,802 | 33,183 |
+
+In requests a second (`bench/run.sh`, ratios to Bun): Hono 77–84% of
+Bun's, from 61–75%; Elysia 88–93%, from 78–85%. The plain servers answer
+26–35% more than Bun, from 16–17%.
+
+- **Quick wins** (−7.4k on Hono). The uWS zeroing went from 6.6k to 0.2k.
+  `beyond build` now uses LLVM when clang is present; Luminous splits a
+  large program's IR so clang compiles the parts in parallel (Hono: 1 min
+  34 s instead of 4 min 19 s, the same instructions per request).
+  `beyond run` and the tests keep Cranelift. Writing response strings
+  without converting them was left: it is already zero-copy for ASCII,
+  with only ~300 instructions left.
+- **Bet A** (−9.1k on Hono). The existing per-context "original" bits
+  (`js_pristine`, re-checked only when the prototype epoch moves, which
+  never happened in steady state in either app) already behaved like
+  JSC's per-feature watchpoints. Bet A added bits for RegExp, array
+  species and "Object.prototype has no `then`". Measured against the
+  estimates:
+
+  | Item | Saved | Estimate |
+  |---|---:|---:|
+  | `str.match(re)` (7.3k → 2.7k) | 4.6k | 5.9k |
+  | species and `slice` | 2.0k | 4.3k |
+  | `Object.keys` (920 → 380) | 0.5k | 1k |
+  | `await` and settling | 0.5k | 2.5k |
+
+  The remainder of each is allocation (arrays, promises, frames), which is
+  Bet B's work. Atom-lookup caching was skipped (a safe cache would need
+  clearing on every GC, for ~0.3k).
+- **Found and fixed on the way:**
+  - `JSON.stringify` of an array with holes after its elements dropped
+    them (`0013`).
+  - Predefined atoms cannot be added to the engine: the builtins shipped
+    as bytecode (`Array.fromAsync`, `Iterator.zip`) number theirs from the
+    table, and test262 caught it.
+- **Next:** Bet B (allocation and the object model). It accounts for most
+  of what remains in each Bet A item, plus the 13 closure boxes and the
+  `instanceof` cost.

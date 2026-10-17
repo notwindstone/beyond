@@ -171,9 +171,11 @@ Against Bun 1.4.3 on the same 4-core machine, runs alternated
 `BUN_OPTIONS` cleared: an environment may set `--smol` there, as this
 machine's does, and the earlier versions of these tables had Bun with
 it). The tables come from one run of `bench/run.sh serve json hono
-elysia fetch url`, at a time this cloud VM ran slowly (its fastest runs
-answer about twice as many requests, Bun's as Beyond's): what carries
-over is each line's ratio to Bun's, which moves by 10–20% between runs.
+elysia fetch url` (Beyond's programs built by `beyond build`, with LLVM),
+after the changes of [docs/direction.md](docs/direction.md)'s section 6:
+what carries over is each line's ratio to Bun's, which moves by 10–20%
+between runs (this cloud VM's speed drifts by 40–60% in a day, Bun's and
+Beyond's alike).
 
 Luminous's values are 8 bytes (NaN-boxed, with 32-bit references: its
 patch 0011, and the numbers it saves on programs that keep data in its
@@ -189,14 +191,15 @@ server runs on:
 
 | | requests/s | p99 latency | memory (RSS) |
 |---|---|---|---|
-| Beyond, text | 62,637 | 2.13 ms | 23 MB |
-| Bun, text | 53,784 | 2.35 ms | 24 MB |
-| Beyond, JSON | 62,299 | 2.03 ms | 23 MB |
-| Bun, JSON | 53,086 | 2.43 ms | 24 MB |
+| Beyond, text | 80,497 | 1.60 ms | 23 MB |
+| Bun, text | 64,115 | 1.90 ms | 23–24 MB |
+| Beyond, JSON | 79,613 | 1.62 ms | 23–24 MB |
+| Bun, JSON | 58,838 | 2.06 ms | 23–24 MB |
 
-Beyond answers about 16% more text and 17% more JSON requests a second
-than Bun, with lower tail latency, in about as much memory (the load
-generator shares the cores; the mean of two runs each).
+Beyond answers about 26% more text and 35% more JSON requests a second
+than Bun (16% and 17% before section 6's changes), with lower tail
+latency, in about as much memory (the load generator shares the cores;
+the mean of two runs each).
 
 JSON of bigger objects, typed (`aot type`) or not (`bench/run.sh json`):
 a user of 7 fields with a nested point made for each request
@@ -206,16 +209,16 @@ and plain (the same program with `type`); Bun has no typed objects:
 
 | | one user | p99 | 50 users | p99 |
 |---|---|---|---|---|
-| Beyond, typed | 66,086 | 1.94 ms | 33,082 | 3.57 ms |
-| Beyond, plain | 67,379 | 1.90 ms | 25,187 | 4.16 ms |
-| Bun | 54,535 | 2.31 ms | 30,835 | 4.01 ms |
+| Beyond, typed | 72,872 | 1.70 ms | 35,561 | 3.03 ms |
+| Beyond, plain | 70,183 | 1.78 ms | 25,945 | 4.04 ms |
+| Bun | 51,659 | 2.41 ms | 33,041 | 3.48 ms |
 
 With one small object, writing the JSON is a small part of a request,
-and Beyond answers 21–24% more than Bun either way. With 50, typed
-objects answer 31% more requests than plain ones, and 7% more than Bun;
-plain ones 18% fewer than Bun (the general fast path reads each object's
+and Beyond answers 36–41% more than Bun either way. With 50, typed
+objects answer 37% more requests than plain ones, and 8% more than Bun;
+plain ones 21% fewer than Bun (the general fast path reads each object's
 keys from its shape, checking each one, where a typed object's are
-encoded once). All use 21–26 MB. What got it there:
+encoded once). All use 21–29 MB. What got it there:
 
 - The request path is native code: `Headers`, `Request` and `Response`
   keep their state in plain fields and check without regular expressions
@@ -240,13 +243,17 @@ middleware that sets a header after the handler, `bench/run.sh hono`):
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 29,163 | 23,442 | 20,556 | 26 MB |
-| Bun | 38,894 | 34,927 | 33,919 | 39 MB |
+| Beyond | 37,987 | 32,074 | 28,592 | 27–28 MB |
+| Bun | 45,435 | 40,641 | 37,180 | 34–41 MB |
 
-Beyond answers 61-75% as many requests a second as Bun, in two thirds of
-the memory (61-74% in a second run; with 16-byte values, alternated with
-it in that run, 56-72%). Against Bun with `--smol`, which is slower here,
-it answered 77-86% (about half before Luminous compiled Hono's classes:
+Beyond answers 77-84% as many requests a second as Bun (74-86% across
+the two runs), in 70% of the memory: 61-75% before the changes of
+[docs/direction.md](docs/direction.md)'s section 6 (the uWS request no
+longer zeroed, the request's fields made when read, builtins that skip
+what the specification looks up while it is unchanged, LLVM by default:
+83,454 instructions a `/users/:id` request, now 67,008; Bun's 43,802).
+Against Bun with `--smol`, which is slower here, it answered 77-86% before
+them (about half before Luminous compiled Hono's classes:
 written as class expressions, with private fields, private methods and
 fields that are arrow functions; 69-74% before native code made closures
 inline, async ones included, and 74-80% before promises and awaits lost
@@ -264,13 +271,13 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 42,276 | 39,103 | 39,249 | 29 MB |
-| Bun | 52,421 | 45,812 | 50,322 | 37 MB |
-| Bun (run-time handlers) | 53,649 | 48,293 | 47,177 | 40 MB |
+| Beyond | 51,021 | 48,618 | 45,708 | 28–29 MB |
+| Bun | 57,853 | 52,146 | 50,503 | 35–41 MB |
+| Bun (run-time handlers) | 55,423 | 52,467 | 52,469 | 39–44 MB |
 
-Beyond answers 78-85% as many requests a second as Bun (80-86% in a
-second run, as with 16-byte values; 84-100% against Bun with `--smol`),
-in 78% of the memory.
+Beyond answers 88-93% as many requests a second as Bun (78-85% before
+section 6's changes; 43,215 instructions a `/users/:id` request, from
+50,825; Bun's 33,183), in 76% of the memory.
 All of Elysia is native but one function (`tee`, a computed method in an
 object literal). The class of each request's context (`class Context
 extends Base`, made in a function) is native since classes inside
@@ -284,13 +291,13 @@ read with `text()` (bench/fetch.ts), three rounds a run, two runs each:
 
 | in flight | Beyond | Bun |
 |---|---|---|
-| 1 | 14,216 fetches/s | 7,371 fetches/s |
-| 10 | 89,373 fetches/s | 53,287 fetches/s |
-| 50 | 86,724 fetches/s | 69,844 fetches/s |
+| 1 | 14,828 fetches/s | 7,736 fetches/s |
+| 10 | 103,484 fetches/s | 58,530 fetches/s |
+| 50 | 108,707 fetches/s | 79,337 fetches/s |
 
-Beyond's client does about 93% more fetches a second than Bun's one at a
-time, 68% more with 10 in flight and 24% more with 50, on one thread (Bun
-gives its client a thread of its own), at a peak of 24-25 MB (Bun: 29-42
+Beyond's client does about 92% more fetches a second than Bun's one at a
+time, 77% more with 10 in flight and 37% more with 50, on one thread (Bun
+gives its client a thread of its own), at a peak of 25-26 MB (Bun: 29-43
 MB).
 Over TLS (against a `Bun.serve` with a certificate), it does about twice
 as many one at a time (17,500 a second; Bun: 9,200), and as many with 50 in
@@ -322,12 +329,11 @@ A fetch of a small response went from about 77,000 instructions to about
   `TypeError` with its stack: 14% of a fetch then. Header names are found
   in a hash table, and picohttpparser scans with SSE4.2.
 
-`new URL(s).href` (bench/url.ts) takes 0.57 µs for a plain URL
-(`http://127.0.0.1:3000/`; Bun: 0.15), 1.0 to 1.25 µs with credentials, a
-port, a query and a fragment (Bun: 0.26), 1.27 to 1.49 µs with dot
-segments (Bun: 0.25), in the slow run of the tables above (0.37, 0.68 and
-0.85 µs in a fast one, Bun's 0.10 to 0.27): four to five times Bun's,
-from 1 to 9 µs before. Luminous
+`new URL(s).href` (bench/url.ts) takes 0.36 to 0.39 µs for a plain URL
+(`http://127.0.0.1:3000/`; Bun: 0.14 to 0.16), 0.57 to 0.6 µs with
+credentials, a port, a query and a fragment (Bun: 0.25), 0.9 to 1.2 µs
+with dot segments (Bun: 0.23): two and a half to five times Bun's, from 1
+to 9 µs before. Luminous
 now compiles the parser's character scans as integer compares (a scan of
 13 compares a character went from 15.6 ns to 2.8 ns a character), and the
 fast path covers credentials, dot segments and escapes, keeps a canonical
