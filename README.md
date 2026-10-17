@@ -160,7 +160,15 @@ Bun's source excerpt, and their stacks' lines are the bundle's.
 ## Performance
 
 Against Bun 1.4.3 on the same 4-core machine, runs alternated
-(`bench/run.sh`, which needs `bun` and `oha`).
+(`bench/run.sh`, which needs `bun` and `oha`, and runs Bun with
+`BUN_OPTIONS` cleared: an environment may set `--smol` there).
+
+Luminous's values are 8 bytes (NaN-boxed, with 32-bit references: its
+patch 0011, and the numbers it saves on programs that keep data in its
+README). A server keeps little, so Beyond's peak about 1 MB lower than
+with 16-byte values (Hono 26 MB from 27, Elysia 29 MB from 30, the plain
+servers 23 MB either way), at the same throughput within this machine's
+drift (measured alternately with a build of the 16-byte engine).
 
 `Beyond.serve` against `Bun.serve`: the same program
 (`new Response("Hello World!")`, and `Response.json({...})` of a small

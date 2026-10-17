@@ -9,6 +9,8 @@
 #   bench/run.sh [serve|json|hono|elysia|fetch|url]...
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Bun as it runs by default (an environment can set --smol here).
+unset BUN_OPTIONS
 beyond=target/release/beyond
 work=$(mktemp -d)
 trap 'kill $(jobs -p) 2>/dev/null || true; rm -rf "$work"' EXIT
