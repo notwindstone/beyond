@@ -8,7 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use luminous_cli::{BuildOpts, EmbedOpts};
+use luminous_cli::{Backend, BuildOpts, EmbedOpts};
 
 #[derive(Parser)]
 #[command(name = "beyond", about = "A JavaScript and TypeScript runtime built on Luminous")]
@@ -109,6 +109,20 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
     Ok(())
 }
 
+/// `beyond build`'s backend when none is chosen (`--backend`,
+/// $LUMINOUS_BACKEND): LLVM, whose code runs faster, if its clang is there,
+/// else Cranelift. (`beyond run` keeps Cranelift's, which compiles faster.)
+fn prefer_llvm(opts: &mut BuildOpts) {
+    if opts.backend.is_some() || std::env::var("LUMINOUS_BACKEND").is_ok_and(|b| !b.is_empty()) {
+        return;
+    }
+    let clang = opts.clang.clone().or_else(|| std::env::var_os("LUMINOUS_CLANG").map(PathBuf::from));
+    let clang = clang.unwrap_or_else(|| "clang".into());
+    if Command::new(&clang).arg("--version").output().is_ok_and(|o| o.status.success()) {
+        opts.backend = Some(Backend::Llvm);
+    }
+}
+
 fn main() {
     if let Err(e) = real_main() {
         let msg = format!("{e:#}");
@@ -126,6 +140,7 @@ fn real_main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Build { input, output, mut opts } => {
             embed(&mut opts)?;
+            prefer_llvm(&mut opts);
             let output = output.unwrap_or_else(|| input.with_extension(""));
             luminous_cli::build(&input, &output, &opts, &fopts)
         }

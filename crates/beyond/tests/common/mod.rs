@@ -23,7 +23,15 @@ pub fn build(app: &Path, exe: &Path) {
         }
         assert!(cargo.status().unwrap().success(), "building beyond-rt failed");
     });
-    let st = Command::new(env!("CARGO_BIN_EXE_beyond")).arg("build").arg(app).arg("-o").arg(exe).status().unwrap();
+    // (With Cranelift, which compiles faster: these are tests of the runtime;
+    // Luminous's own tests cover both backends.)
+    let st = Command::new(env!("CARGO_BIN_EXE_beyond"))
+        .args(["build", "--backend", "cranelift"])
+        .arg(app)
+        .arg("-o")
+        .arg(exe)
+        .status()
+        .unwrap();
     assert!(st.success(), "beyond build {} failed", app.display());
 }
 
