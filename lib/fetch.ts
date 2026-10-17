@@ -953,11 +953,17 @@ function requestBody(input: string | Request, init: RequestInit | undefined): St
   return input._body;
 }
 
+/** [name, value, ...] of a request's packed fields (Request._fields). */
+export function unpackFields(fields: string): string[] {
+  return fields === "" ? [] : fields.split("\r");
+}
+
 export class Request extends Body {
   readonly method: string;
   readonly url: string;
-  // (From the server: the fields, until `headers` is read.)
-  _flat: string[] | null = null;
+  // (From the server: its fields, until `headers` is read, packed as
+  // "name\rvalue\rname\rvalue": a field holds no CR.)
+  _fields: string | null = null;
   _headers: Headers | null = null;
 
   constructor(input: string | Request, init?: RequestInit) {
@@ -982,11 +988,11 @@ export class Request extends Body {
   }
 
   /** A request the server received. */
-  static _fromServer(method: string, url: string, flat: string[], body: ArrayBuffer | undefined): Request {
+  static _fromServer(method: string, url: string, fields: string, body: ArrayBuffer | undefined): Request {
     const r = new Request(url);
     if (method !== "GET") (r as any).method = method;
     if (body !== undefined) r._body = body;
-    r._flat = flat;
+    r._fields = fields;
     r._received = true;
     return r;
   }
@@ -998,9 +1004,9 @@ export class Request extends Body {
   get headers(): Headers {
     let h = this._headers;
     if (h === null) {
-      h = this._flat !== null ? Headers._fromFlat(this._flat) : new Headers();
+      h = this._fields !== null ? Headers._fromFlat(unpackFields(this._fields)) : new Headers();
       this._headers = h;
-      this._flat = null;
+      this._fields = null;
     }
     return h;
   }

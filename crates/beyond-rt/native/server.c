@@ -233,21 +233,34 @@ JSValue beyond_common_string(JSContext *ctx, const char *p, size_t n) {
     return JS_NewStringLen(ctx, p, n);
 }
 
-#define MAX_FIELDS 512
-
+// The request's fields for JavaScript, made into strings only if it reads
+// them: one string, "name\rvalue\rname\rvalue" (names in lower case: Bun's
+// uWebSockets keeps them as sent; a field holds no CR).
 typedef struct {
-    JSContext *ctx;
-    JSValue values[MAX_FIELDS];
-    uint32_t n;
+    char *buf;
+    size_t len, cap;
+    char stack[2048];
     const char *host;
     size_t host_len;
 } HeaderSink;
 
-// (Names in lower case: Bun's uWebSockets keeps them as sent.)
+static void sink_put(HeaderSink *h, const char *p, size_t n) {
+    if (h->len + n > h->cap) {
+        size_t cap = h->cap * 2 > h->len + n ? h->cap * 2 : h->len + n;
+        char *b = h->buf == h->stack ? malloc(cap) : realloc(h->buf, cap);
+        if (!b)
+            return;
+        if (h->buf == h->stack)
+            memcpy(b, h->stack, h->len);
+        h->buf = b;
+        h->cap = cap;
+    }
+    memcpy(h->buf + h->len, p, n);
+    h->len += n;
+}
+
 static void add_header(void *user, const char *k, size_t kl, const char *v, size_t vl) {
     HeaderSink *h = user;
-    if (h->n + 2 > MAX_FIELDS)
-        return;
     char lower[256];
     if (kl <= sizeof lower) {
         for (size_t i = 0; i < kl; i++)
@@ -258,8 +271,11 @@ static void add_header(void *user, const char *k, size_t kl, const char *v, size
         h->host = v;
         h->host_len = vl;
     }
-    h->values[h->n++] = beyond_common_string(h->ctx, k, kl);
-    h->values[h->n++] = JS_NewStringLen(h->ctx, v, vl);
+    if (h->len)
+        sink_put(h, "\r", 1);
+    sink_put(h, k, kl);
+    sink_put(h, "\r", 1);
+    sink_put(h, v, vl);
 }
 
 static void on_aborted(uws_res_t *res, void *data);
@@ -413,12 +429,15 @@ static void on_request(uws_res_t *res, uws_req_t *req, void *user) {
     s->head = n == 4 && memcmp(p, "HEAD", 4) == 0;
     s->args[0] = beyond_common_string(ctx, p, n);
     HeaderSink h;
-    h.ctx = ctx;
-    h.n = 0;
+    h.buf = h.stack;
+    h.len = 0;
+    h.cap = sizeof h.stack;
     h.host = NULL;
     h.host_len = 0;
     beyond_req_headers(req, add_header, &h);
-    s->args[2] = JS_NewArrayFrom(ctx, (int)h.n, h.values);
+    s->args[2] = JS_NewStringLen(ctx, h.buf, h.len);
+    if (h.buf != h.stack)
+        free(h.buf);
     // The URL: http://host/path (localhost without a Host header).
     n = uws_req_get_url(req, &p);
     if (!h.host) {

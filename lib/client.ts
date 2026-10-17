@@ -540,7 +540,7 @@ export function fetch(input: string | URL | Request, init?: FetchInit): Promise<
   const redirect = init?.redirect ?? "follow";
   const tls = tlsConfig(init?.tls);
   // (Copied: redirects change them.)
-  const headers = req._headers === null && req._flat === null ? null : new Headers(req.headers);
+  const headers = req._headers === null && req._fields === null ? null : new Headers(req.headers);
   if (req._body === null && req._stream === null) {
     return new Fetch(t, req.method, headers, null, redirect, signal, tls).start();
   }

@@ -193,7 +193,14 @@ struct HttpResponseData;
         struct Header
         {
             std::string_view key, value;
-        } headers[UWS_HTTP_MAX_HEADERS_COUNT];
+        };
+        /* Beyond: not constructed (a union member), so that each request does
+         * not zero 200 headers (6.4 KB): the parser writes the request line,
+         * the fields it read and an empty key after the last, all that is
+         * read of them (HeaderIterator and getHeader stop at the empty key). */
+        union {
+            Header headers[UWS_HTTP_MAX_HEADERS_COUNT];
+        };
         bool ancientHttp;
         bool didYield;
         /* Written right before the request handler runs; see getHasTransferEncoding(). */
@@ -203,6 +210,8 @@ struct HttpResponseData;
         std::pair<int, std::string_view *> currentParameters;
 
     public:
+        HttpRequest() {}
+
         /* Any data pipelined after the HTTP headers (before response).
          * Used for Node.js compatibility: 'connect' and 'upgrade' events
          * pass this as the 'head' Buffer parameter.

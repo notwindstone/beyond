@@ -16,7 +16,7 @@ import {
   writeChunk,
   xxh64Hex,
 } from "beyond:native";
-import { Incoming, IncomingOwner, Request, Response } from "./fetch.ts";
+import { Incoming, IncomingOwner, Request, Response, unpackFields } from "./fetch.ts";
 import { chunkBytes, ReadableStream, ReadableStreamDefaultReader, readableStreamCancel, takeWholeStream } from "./streams.ts";
 
 type Handler = (request: Request, server: Server) => Response | Promise<Response>;
@@ -400,7 +400,8 @@ async function sendStream(handle: number, res: Response, stream: ReadableStream<
 
 /** A static route's response (304 when the client's etag is its). */
 function sendStatic(handle: number, request: Request, r: StaticResponse): void {
-  const inm = request._flat !== null ? flatGet(request._flat, "if-none-match") : request.headers.get("if-none-match");
+  const inm =
+    request._fields !== null ? flatGet(unpackFields(request._fields), "if-none-match") : request.headers.get("if-none-match");
   if (inm !== null && etagMatches(inm, r.etag)) {
     respond(handle, 304, "Not Modified", r.flat, null, null);
     return;
@@ -459,11 +460,11 @@ export function serve(options: ServeOptions): Server {
     handle: number,
     method: string,
     url: string,
-    flat: string[],
+    fields: string,
     body: ArrayBuffer | true | undefined,
     first: Uint8Array | undefined,
   ): Incoming | undefined => {
-    const request = Request._fromServer(method, url, flat, body === true ? undefined : body);
+    const request = Request._fromServer(method, url, fields, body === true ? undefined : body);
     let incoming: Incoming | undefined = undefined;
     if (body === true) {
       incoming = new Incoming(new Arriving(handle));

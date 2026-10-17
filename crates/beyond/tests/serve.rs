@@ -80,6 +80,15 @@ fn serve() {
         body,
         r#"{"url":"http://example.test/headers?q=1","headers":[["connection","close"],["host","example.test"],["x-mixed-case","Va lue"]]}"#
     );
+    // (An empty value, first and last.)
+    let (_, body) = request(
+        port,
+        "GET /headers HTTP/1.1\r\nX-Empty:\r\nHost: h\r\nX-Last: \r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        body,
+        r#"{"url":"http://h/headers","headers":[["connection","close"],["host","h"],["x-empty",""],["x-last",""]]}"#
+    );
 
     let (head, body) =
         request(port, "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc");
