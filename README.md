@@ -32,6 +32,10 @@ How it is built, following [Bun](https://github.com/oven-sh/bun) (see
 The native core is Rust (a static library with a C interface, linked into
 each program), with uSockets and uWebSockets as C and C++.
 
+Where the remaining gap to Bun lies (the untyped JavaScript of frameworks,
+not the server), how JavaScriptCore and Bun handle it, and the changes
+planned from that: [docs/direction.md](docs/direction.md).
+
 ## Building
 
 ```sh
