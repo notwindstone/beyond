@@ -354,6 +354,14 @@ more than Bun, from 16–17%.
   Object creation is now 2.1k (from 3.6k). Peak memory of Luminous's
   benchmarks is unchanged, but for `strbuild` (34 → 38 MB, a collection
   timing shift: the same number of collections).
+- **Awaits that continue at once**, as Bun's AOT compiler does: an async
+  function resumed by its own job continues an `await` without
+  suspending when no other job is pending and the value is a primitive
+  or a fulfilled promise (suspending would queue only its resumption,
+  which would run next). `await` of a resolved promise in a loop: 338
+  instructions, now 96 (Bun's JIT 458, Bun's AOT ~40); an await that
+  suspends costs ~10 more. Hono and Elysia per request are unchanged
+  (49.7k, 35.1k): their awaits happen before a handler first suspends.
 - **Found and fixed on the way:**
   - `JSON.stringify` of an array with holes after its elements dropped
     them (`0013`).
