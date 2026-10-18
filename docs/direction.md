@@ -362,6 +362,15 @@ more than Bun, from 16–17%.
   instructions, now 96 (Bun's JIT 458, Bun's AOT ~40); an await that
   suspends costs ~10 more. Hono and Elysia per request are unchanged
   (49.7k, 35.1k): their awaits happen before a handler first suspends.
+- **JSON.stringify** (instructions a call; Bun's JIT / Bun's AOT compiler
+  untyped / typed): plain objects keep their keys encoded per shape, Dates
+  are written directly, and an `aot type` has a writer generated for its
+  layout, called directly from native code. A 4-property object 2,035 →
+  788 (1,311 / 1,293 / 578); as an `aot type` 1,466 → 577; with two Dates
+  23,551 → 1,429 (12,524 / 1,687 / 788). Hono `/json` 45.8k → 44.5k a
+  request, `/users/42` 49.7k → 49.0k; Elysia 35.1k → 34.4k. Writes of
+  fields of `aot type` array elements are fixed-offset stores (771 → 41
+  an element).
 - **Found and fixed on the way:**
   - `JSON.stringify` of an array with holes after its elements dropped
     them (`0013`).
