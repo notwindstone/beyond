@@ -245,11 +245,11 @@ middleware that sets a header after the handler, `bench/run.sh hono`):
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 44,468 | 38,907 | 34,822 | 28 MB |
-| Bun | 47,266 | 40,282 | 38,048 | 34–42 MB |
+| Beyond | 45,629 | 41,022 | 35,294 | 28 MB |
+| Bun | 45,975 | 39,764 | 38,763 | 36–43 MB |
 
-Beyond answers 90-99% as many requests a second as Bun (92-97% on
-average), in 70-80% of the memory: 61-75% before the changes of
+Beyond answers 89-108% as many requests a second as Bun (91-103% on
+average: `/users/:id` the lowest), in 65-78% of the memory: 61-75% before the changes of
 [docs/direction.md](docs/direction.md)'s section 6 (the uWS request no
 longer zeroed, the request's fields made when read, builtins that skip
 what the specification looks up while it is unchanged, LLVM by default:
@@ -257,7 +257,7 @@ what the specification looks up while it is unchanged, LLVM by default:
 its Bet B (an object model that pays at creation: closure variables
 captured by value, caches for `instanceof`, for added and for absent
 properties, arrays and property arrays that need no finalization: now
-53,886; Bun's 43,802).
+52,818; Bun's 43,802).
 Against Bun with `--smol`, which is slower here, it answered 77-86% before
 them (about half before Luminous compiled Hono's classes:
 written as class expressions, with private fields, private methods and
@@ -277,13 +277,13 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 57,657 | 54,445 | 51,742 | 28–29 MB |
-| Bun | 58,842 | 53,880 | 50,287 | 34–39 MB |
-| Bun (run-time handlers) | 56,118 | 52,591 | 52,700 | 38–42 MB |
+| Beyond | 60,048 | 54,807 | 51,609 | 29–30 MB |
+| Bun | 57,016 | 53,879 | 52,539 | 33–40 MB |
+| Bun (run-time handlers) | 57,626 | 54,546 | 52,820 | 38–43 MB |
 
-Beyond answers 96-105% as many requests a second as Bun (98-103% on
+Beyond answers 95-108% as many requests a second as Bun (98-105% on
 average; 78-85% before section 6's changes, 88-93% before its Bet B;
-36,824 instructions a `/users/:id` request, from 50,825; Bun's 33,183),
+35,820 instructions a `/users/:id` request, from 50,825; Bun's 33,183),
 in 75-85% of the memory.
 All of Elysia is native but one function (`tee`, a computed method in an
 object literal). The class of each request's context (`class Context

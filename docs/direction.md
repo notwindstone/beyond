@@ -287,12 +287,12 @@ request under callgrind, steady state, LLVM backend:
 | before | 83,454 | 50,825 |
 | uWS request no longer zeroed; request fields one string, split on use | 76,077 | |
 | Bet A (`0012`), with the above | 67,008 | 43,215 |
-| Bet B (`0014`, `0015`, Luminous), with the above | 53,886 | 36,824 |
+| Bet B (`0014`–`0016`, Luminous), with the above | 52,818 | 35,820 |
 | Bun 1.4.3 | 43,802 | 33,183 |
 
-In requests a second (`bench/run.sh`, ratios to Bun): Hono 90–99% of
-Bun's after Bet B, 77–84% after Bet A, from 61–75%; Elysia 96–105% after
-Bet B, 88–93% after Bet A, from 78–85%. The plain servers answer 26–35%
+In requests a second (`bench/run.sh`, ratios to Bun): Hono 89–108% of
+Bun's after Bet B (`/users/:id` 89–94%), 77–84% after Bet A, from 61–75%;
+Elysia 95–108% after Bet B, 88–93% after Bet A, from 78–85%. The plain servers answer 26–35%
 more than Bun, from 16–17%.
 
 - **Quick wins** (−7.4k on Hono). The uWS zeroing went from 6.6k to 0.2k.
@@ -319,7 +319,7 @@ more than Bun, from 16–17%.
   The remainder of each is allocation (arrays, promises, frames), which is
   Bet B's work. Atom-lookup caching was skipped (a safe cache would need
   clearing on every GC, for ~0.3k).
-- **Bet B** (−13.1k on Hono, −6.4k on Elysia; estimate −12 to −17k).
+- **Bet B** (−14.2k on Hono, −7.4k on Elysia; estimate −12 to −17k).
   Each measured on Hono as it went in:
 
   | Item | Saved | Estimate |
@@ -331,9 +331,12 @@ more than Bun, from 16–17%.
   | Inline caches marked in a minor collection only while they hold young shapes | 0.7k | |
   | Per-site entries for properties a shape lacks (a miss cache) | 0.7k | 2–4k with the epoch split |
   | Luminous's runtime and glue compiled without stack protector and CET markers, as the engine | 0.5k | |
+  | Builtin constructors' and namespaces' shapes shared at startup, so that sites cache their static methods (`Object.create`, `JSON.stringify`; Elysia: 1.0k) | ~0.8k | |
+  | The collection trigger's test inline in allocations (`0016`) | ~0.2k | |
 
   Not done: final-shape allocation and a slimmer allocation path (object
-  creation is still 3.6k: ~120 instructions an object), and the epoch
+  creation is still 3.6k: ~100 instructions an object, a fifth of it the
+  function's prologue and epilogue), and the epoch
   split (the epoch never moved in steady state, as with Bet A). The
   VM-wide miss cache became per-site entries: what missed every request
   was a few sites, each with one absent property.
@@ -350,7 +353,7 @@ more than Bun, from 16–17%.
     variable closed, a minor collection freed it under the closure. A
     stress test of Bet B's young-cache list found it, with a 64 KB young
     generation (`gc_young_caches.ts` in Luminous's tests).
-- **What remains** (Hono, 53.9k against Bun's 43.8k):
+- **What remains** (Hono, 52.8k against Bun's 43.8k):
   - Hono's router: `match` in `reg-exp-router/matcher.js` uses `this` in
     a plain function, which Luminous does not compile; the arrow it makes
     and the SmartRouter binds runs in the interpreter (~2k a request).
@@ -358,9 +361,8 @@ more than Bun, from 16–17%.
     res)`): Beyond makes a byte stream for the body every request, and a
     controller for it (3.3k). A stream of a stored body could stay a body
     until read.
-  - Elysia's remaining misses: static methods of builtin constructors and
-    namespaces (`Object.create`, `Array.isArray`, `JSON.stringify`), whose
-    shapes are their own, so their sites stop caching; and `obj[key]`
-    reads, which go through the engine (8 a request).
+  - `obj[key]` reads go through the engine, with the key made an atom each
+    time (Elysia: 8 a request, ~1.3k; Hono: 7). A site could cache the
+    key string with the shape, as JSC's get-by-value does.
   - Object creation (3.6k), strings and atoms (3.8k), calls into C
     builtins (3.2k), promises (3.0k).
