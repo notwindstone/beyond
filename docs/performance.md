@@ -87,19 +87,22 @@ this VM's speed moves by up to 2x between runs here):
 
 | | Beyond | Bun 1.4.3 |
 |---|---:|---:|
-| `aot type X = Array<A>` (A an `aot type`) | 1.5–4.3 | 3.0–3.6 |
-| `type Y = Array<A>` (a plain alias of the same) | 1.4–3.9 | 2.7–4.2 |
-| `type Z = Array<B>` (plain objects) | 15–21 | 2.7–4.8 |
-| `Object.freeze` of an array of plain objects | 43–61 | 44–53 |
+| `aot type X = Array<A>` (A an `aot type`) | 1.4–4.3 | 2.8–3.6 |
+| `type Y = Array<A>` (a plain alias of the same) | 1.3–3.9 | 2.7–4.2 |
+| `type Z = Array<B>` (plain objects) | 13.5–21 | 2.7–4.8 |
+| `Object.freeze` of an array of plain objects | 13.7–14.3 | 42–53 |
+| `Object.freeze` of an `aot type X` array | 1.3 | 42–43 |
 
 A plain alias of an array of an `aot type` is that type (it was read as an
 untyped array: 22–27 ns). Untyped objects are where Bun's JIT is ahead (its
-inline caches; Beyond's are the engine's). A frozen array is slow in both:
-freezing makes QuickJS's array, and JSC's, a dictionary of properties.
-`Object.freeze` of an array of `aot type` objects throws (it cannot
-redefine its elements), and `Object.keys(o).length` makes the array of
-keys: 42–46 ns for a 5-field plain object (Bun: 15 ns), 311–342 ns for an
-`aot type` object.
+inline caches; Beyond's are the engine's). Freezing an array keeps it as
+fast as before (Luminous's patch `0023`: it made QuickJS's array a
+dictionary of properties, 43–61 ns, as freezing does JSC's), and an array
+of `aot type` objects freezes and seals as a whole (it threw).
+`Object.keys(o).length` counts the keys without making the array (patch
+`0022`): 14 ns for a 5-field plain object (42–46 before), 15 ns for an
+`aot type` object (311–342 before); Bun 13–15 ns. Counting them with
+`for`-`in` is still 144–152 ns (Bun: 11–17).
 
 `JSON.parse(text)` and `await r.json()` where an `aot type` is expected
 parse to it directly (only its fields made: Luminous's README, "From
@@ -107,13 +110,15 @@ JSON"); the same text plain, and Bun's (two runs):
 
 | | typed | plain | Bun |
 |---|---:|---:|---:|
-| `JSON.parse`, one object of 6 fields (one nested) | 695–738 ns | 1,424–1,995 ns | 342–399 ns |
-| `JSON.parse`, 50 of them with 3 fields the type lacks (6.6 KB) | 52.7–54.6 µs | 141–158 µs | 46.6–60.6 µs |
-| `Response#json()`, the same 50 from bytes | 57.9–67.5 µs | 165–197 µs | 58.2–76.5 µs |
+| `JSON.parse`, one object of 6 fields (one nested) | 329–350 ns | 1,470–1,516 ns | 343–381 ns |
+| `JSON.parse`, 50 of them with 3 fields the type lacks (6.6 KB) | 31.3–32.2 µs | 146–148 µs | 45.5–45.9 µs |
+| `Response#json()`, the same 50 from bytes | 35.7–37.4 µs | 145–163 µs | 57.5–60.8 µs |
 
-Typed, the 50 objects parse in about a third of the time a plain parse
-takes, as fast as Bun's plain parse; one small object, in half the time,
-but twice Bun's.
+Typed, one small object parses as fast as Bun's parse, and the 50 objects
+in about 70% of its time (60% from a body). Before the parser's numbers,
+keys, strings and checks were made cheaper (5,927 instructions for the
+small object, now 2,985), the small one took 695–738 ns and the 50
+52.7–54.6 µs. Plain, QuickJS's `JSON.parse` takes four times Bun's.
 
 ## Hono
 
