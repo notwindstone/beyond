@@ -26,3 +26,8 @@ dumps (`OUT.1`).
 - `cgcallers.py FILE FUNCTION`: callers of a function, inclusive.
 - `cgedges.py FILE REQUESTS CALLER_REGEX`: what calls out of a set of
   functions (e.g. compiled code, `'lum_(fn|fast)_\d+'`) cost, by callee.
+- `cgcallees.py FILE REQUESTS CALLER_REGEX CALLEE_REGEX [N]`: the calls
+  between two sets of functions, with their counts and inclusive costs
+  per request (`'.' '^JS_SetProperty$'`: who calls it, how often, at what
+  cost). `beyond build --keep DIR` keeps the glue, whose comments name the
+  JS function of each `lum_fn_N` and `lum_fast_N`.

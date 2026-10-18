@@ -33,7 +33,7 @@ RULES = [
  ('property get (generic + IC misses)', r'(JS_GetPropertyInternal|lum_ic_get|JS_GetPropertyValue|JS_GetOwnDataHint|JS_GetPropertyStr|lum_call_getter|find_own_property|JS_Cache|JS_WatchProto|JS_GetPropertyInt64|lum_ic_fill|lum_ic_full|lum_ic_poly|JS_OwnDataIs|JS_GetOwnPropertyInternal|JS_GetProperty$|JS_GetOpaque|JS_GetClassID|JS_GetLength|lum_ic_)'),
  ('property set', r'(JS_SetPropertyInternal|lum_ic_set|JS_SetProperty)'),
  ('calls (C builtins, frames)', r'(JS_CallBuiltin|js_call_c_function|JS_CallStringFn|JS_CallFast|js_call_fast|js_call_bound_function|lum_call$|lum_frame|JS_CallMapFn|JS_Call$|JS_CallFree|js_call_|lum_rest|JS_GetFunctionRealm)'),
- ('instanceof, brand checks', r'(JS_IsInstanceOf|JS_OrdinaryIsInstanceOf|JS_PrivateCheckBrand)'),
+ ('instanceof, brand checks', r'(JS_IsInstanceOf|JS_OrdinaryIsInstanceOf|JS_PrivateCheckBrand|lum_instanceof|js_default_has_instance|JS_CacheInstanceOf)'),
  ('regexp', r'(lre_|js_regexp|JS_RegExp|js_string_match)'),
  ('JSON', r'(js_json|JS_JSON)'),
  ('arrays', r'(add_fast_array|expand_fast_array|js_array|JS_NewArray|set_array_length|JS_ArrayPush|JS_ArraySpecies|lum_new_array|js_get_fast_array|JS_ToArrayLength|js_get_length|JS_DefinePropertyValueUint32|lum_array|js_is_array|js_allocate_fast_array|js_create_array|free_property|convert_fast_array)'),

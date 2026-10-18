@@ -172,7 +172,9 @@ Against Bun 1.4.3 on the same 4-core machine, runs alternated
 machine's does, and the earlier versions of these tables had Bun with
 it). The tables come from one run of `bench/run.sh serve json hono
 elysia fetch url` (Beyond's programs built by `beyond build`, with LLVM),
-after the changes of [docs/direction.md](docs/direction.md)'s section 6:
+after the changes of [docs/direction.md](docs/direction.md)'s section 6
+(the Hono and Elysia tables from `bench/run.sh hono elysia` after its Bet
+B, the averages of the run's two rounds):
 what carries over is each line's ratio to Bun's, which moves by 10–20%
 between runs (this cloud VM's speed drifts by 40–60% in a day, Bun's and
 Beyond's alike).
@@ -243,15 +245,19 @@ middleware that sets a header after the handler, `bench/run.sh hono`):
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 37,987 | 32,074 | 28,592 | 27–28 MB |
-| Bun | 45,435 | 40,641 | 37,180 | 34–41 MB |
+| Beyond | 44,468 | 38,907 | 34,822 | 28 MB |
+| Bun | 47,266 | 40,282 | 38,048 | 34–42 MB |
 
-Beyond answers 77-84% as many requests a second as Bun (74-86% across
-the two runs), in 70% of the memory: 61-75% before the changes of
+Beyond answers 90-99% as many requests a second as Bun (92-97% on
+average), in 70-80% of the memory: 61-75% before the changes of
 [docs/direction.md](docs/direction.md)'s section 6 (the uWS request no
 longer zeroed, the request's fields made when read, builtins that skip
 what the specification looks up while it is unchanged, LLVM by default:
-83,454 instructions a `/users/:id` request, now 67,008; Bun's 43,802).
+83,454 instructions a `/users/:id` request, then 67,008), and 77-84% before
+its Bet B (an object model that pays at creation: closure variables
+captured by value, caches for `instanceof`, for added and for absent
+properties, arrays and property arrays that need no finalization: now
+53,886; Bun's 43,802).
 Against Bun with `--smol`, which is slower here, it answered 77-86% before
 them (about half before Luminous compiled Hono's classes:
 written as class expressions, with private fields, private methods and
@@ -271,13 +277,14 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 51,021 | 48,618 | 45,708 | 28–29 MB |
-| Bun | 57,853 | 52,146 | 50,503 | 35–41 MB |
-| Bun (run-time handlers) | 55,423 | 52,467 | 52,469 | 39–44 MB |
+| Beyond | 57,657 | 54,445 | 51,742 | 28–29 MB |
+| Bun | 58,842 | 53,880 | 50,287 | 34–39 MB |
+| Bun (run-time handlers) | 56,118 | 52,591 | 52,700 | 38–42 MB |
 
-Beyond answers 88-93% as many requests a second as Bun (78-85% before
-section 6's changes; 43,215 instructions a `/users/:id` request, from
-50,825; Bun's 33,183), in 76% of the memory.
+Beyond answers 96-105% as many requests a second as Bun (98-103% on
+average; 78-85% before section 6's changes, 88-93% before its Bet B;
+36,824 instructions a `/users/:id` request, from 50,825; Bun's 33,183),
+in 75-85% of the memory.
 All of Elysia is native but one function (`tee`, a computed method in an
 object literal). The class of each request's context (`class Context
 extends Base`, made in a function) is native since classes inside
