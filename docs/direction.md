@@ -288,11 +288,13 @@ request under callgrind, steady state, LLVM backend:
 | uWS request no longer zeroed; request fields one string, split on use | 76,077 | |
 | Bet A (`0012`), with the above | 67,008 | 43,215 |
 | Bet B (`0014`–`0016`, Luminous), with the above | 52,818 | 35,820 |
+| Plain functions using `this` native; allocation fast paths (`0017`); one-cell boxes | 49,723 | 35,133 |
 | Bun 1.4.3 | 43,802 | 33,183 |
 
-In requests a second (`bench/run.sh`, ratios to Bun): Hono 89–108% of
-Bun's after Bet B (`/users/:id` 89–94%), 77–84% after Bet A, from 61–75%;
-Elysia 95–108% after Bet B, 88–93% after Bet A, from 78–85%. The plain servers answer 26–35%
+In requests a second (`bench/run.sh`, ratios to Bun): Hono 97–125% of
+Bun's now (102–114% on average), 89–108% after Bet B, 77–84% after Bet A,
+from 61–75%; Elysia 97–115% now, 95–108% after Bet B, 88–93% after Bet A,
+from 78–85%. The plain servers answer 26–35%
 more than Bun, from 16–17%.
 
 - **Quick wins** (−7.4k on Hono). The uWS zeroing went from 6.6k to 0.2k.
@@ -340,6 +342,18 @@ more than Bun, from 16–17%.
   split (the epoch never moved in steady state, as with Bet A). The
   VM-wide miss cache became per-site entries: what missed every request
   was a few sites, each with one absent property.
+- **After Bet B** (−3.1k on Hono, −0.7k on Elysia), each measured on Hono:
+
+  | Item | Saved |
+  |---|---:|
+  | Ordinary functions that use `this` compile (it is the receiver, or undefined in a plain call: module code is strict); Hono's router `match` and the arrow it makes no longer run interpreted (interpreter: 1,142 → 59) | 1.0k |
+  | One-cell boxes: the value in the box object's own cell, no traced block of its own, no finalizer | 0.7k |
+  | Plain objects and arrays of the original shape made inline (header in one store, no per-class switch), empty arrays included | 0.7k |
+  | An empty array literal has room for 4 elements in its own cell: the pushes that follow allocate nothing | 0.6k |
+
+  Object creation is now 2.1k (from 3.6k). Peak memory of Luminous's
+  benchmarks is unchanged, but for `strbuild` (34 → 38 MB, a collection
+  timing shift: the same number of collections).
 - **Found and fixed on the way:**
   - `JSON.stringify` of an array with holes after its elements dropped
     them (`0013`).
@@ -353,10 +367,7 @@ more than Bun, from 16–17%.
     variable closed, a minor collection freed it under the closure. A
     stress test of Bet B's young-cache list found it, with a 64 KB young
     generation (`gc_young_caches.ts` in Luminous's tests).
-- **What remains** (Hono, 52.8k against Bun's 43.8k):
-  - Hono's router: `match` in `reg-exp-router/matcher.js` uses `this` in
-    a plain function, which Luminous does not compile; the arrow it makes
-    and the SmartRouter binds runs in the interpreter (~2k a request).
+- **What remains** (Hono, 49.7k against Bun's 43.8k):
   - Hono sets each response from the previous one (`new Response(res.body,
     res)`): Beyond makes a byte stream for the body every request, and a
     controller for it (3.3k). A stream of a stored body could stay a body
@@ -364,5 +375,5 @@ more than Bun, from 16–17%.
   - `obj[key]` reads go through the engine, with the key made an atom each
     time (Elysia: 8 a request, ~1.3k; Hono: 7). A site could cache the
     key string with the shape, as JSC's get-by-value does.
-  - Object creation (3.6k), strings and atoms (3.8k), calls into C
-    builtins (3.2k), promises (3.0k).
+  - Strings and atoms (3.8k), calls into C builtins (3.2k), promises
+    (3.0k), arrays (2.9k), object creation (2.1k).

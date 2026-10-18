@@ -174,7 +174,8 @@ it). The tables come from one run of `bench/run.sh serve json hono
 elysia fetch url` (Beyond's programs built by `beyond build`, with LLVM),
 after the changes of [docs/direction.md](docs/direction.md)'s section 6
 (the Hono and Elysia tables from `bench/run.sh hono elysia` after its Bet
-B, the averages of the run's two rounds):
+B and what followed, the averages of the run's two rounds, on a day this
+machine ran about a third slower: Bun's own figures are too):
 what carries over is each line's ratio to Bun's, which moves by 10–20%
 between runs (this cloud VM's speed drifts by 40–60% in a day, Bun's and
 Beyond's alike).
@@ -245,19 +246,21 @@ middleware that sets a header after the handler, `bench/run.sh hono`):
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 45,629 | 41,022 | 35,294 | 28 MB |
-| Bun | 45,975 | 39,764 | 38,763 | 36–43 MB |
+| Beyond | 30,669 | 26,631 | 25,505 | 27–28 MB |
+| Bun | 29,993 | 24,434 | 22,341 | 33–41 MB |
 
-Beyond answers 89-108% as many requests a second as Bun (91-103% on
-average: `/users/:id` the lowest), in 65-78% of the memory: 61-75% before the changes of
+Beyond answers 97-125% as many requests a second as Bun (102-114% on
+average), in 68-85% of the memory: 61-75% before the changes of
 [docs/direction.md](docs/direction.md)'s section 6 (the uWS request no
 longer zeroed, the request's fields made when read, builtins that skip
 what the specification looks up while it is unchanged, LLVM by default:
 83,454 instructions a `/users/:id` request, then 67,008), and 77-84% before
 its Bet B (an object model that pays at creation: closure variables
 captured by value, caches for `instanceof`, for added and for absent
-properties, arrays and property arrays that need no finalization: now
-52,818; Bun's 43,802).
+properties, arrays and property arrays that need no finalization: 52,818),
+and 89-108% before ordinary functions using `this` (Hono's router)
+compiled and objects and arrays were made inline (now 49,723; Bun's
+43,802).
 Against Bun with `--smol`, which is slower here, it answered 77-86% before
 them (about half before Luminous compiled Hono's classes:
 written as class expressions, with private fields, private methods and
@@ -265,10 +268,9 @@ fields that are arrow functions; 69-74% before native code made closures
 inline, async ones included, and 74-80% before promises and awaits lost
 their allocations: see Luminous's patch 0007). Its
 responses are Bun's but for the case of header names. What Hono still
-costs more here: the objects the engine makes for each request, the
-response its middleware makes again with its headers copied, and its
-router's `match`, a function using `this` outside a class, which stays
-interpreted.
+costs more here: the objects the engine makes for each request, and the
+response its middleware makes again with its headers copied (its body
+made a stream).
 
 The same routes in Elysia 2 (bench/elysia, `bench/run.sh elysia`): one
 bundle built ahead of time with Elysia's AOT plugin, on Beyond and on Bun,
@@ -277,13 +279,13 @@ and on Bun the app as written too (Elysia composing its handlers with
 
 | | text | JSON | `/users/:id` | memory |
 |---|---|---|---|---|
-| Beyond | 60,048 | 54,807 | 51,609 | 29–30 MB |
-| Bun | 57,016 | 53,879 | 52,539 | 33–40 MB |
-| Bun (run-time handlers) | 57,626 | 54,546 | 52,820 | 38–43 MB |
+| Beyond | 45,074 | 38,788 | 38,919 | 29–30 MB |
+| Bun | 39,306 | 37,372 | 35,232 | 35–40 MB |
+| Bun (run-time handlers) | 38,079 | 36,769 | 33,777 | 37–43 MB |
 
-Beyond answers 95-108% as many requests a second as Bun (98-105% on
+Beyond answers 97-115% as many requests a second as Bun (104-115% on
 average; 78-85% before section 6's changes, 88-93% before its Bet B;
-35,820 instructions a `/users/:id` request, from 50,825; Bun's 33,183),
+35,133 instructions a `/users/:id` request, from 50,825; Bun's 33,183),
 in 75-85% of the memory.
 All of Elysia is native but one function (`tee`, a computed method in an
 object literal). The class of each request's context (`class Context
