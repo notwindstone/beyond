@@ -272,3 +272,63 @@ fn routes() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// `reusePort` (tests/serve/reuse.ts): what Bun 1.4.3 prints, without
+/// NODE_UNIQUE_ID and with it, then those two processes on the port PORT
+/// names, the kernel spreading the connections across them.
+#[test]
+fn reuse_port() {
+    let dir = common::tempdir("serve-reuse");
+    let exe = dir.join("reuse");
+    common::build(&common::test_file("serve/reuse.ts"), &exe);
+    let shared = std::net::TcpListener::bind("0.0.0.0:0").unwrap().local_addr().unwrap().port();
+
+    let mut children = Vec::new();
+    let mut outputs = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for cluster in [false, true] {
+        let mut cmd = Command::new(&exe);
+        cmd.env_remove("BUN_PORT").env("PORT", shared.to_string()).env_remove("NODE_UNIQUE_ID");
+        if cluster {
+            cmd.env("NODE_UNIQUE_ID", "1");
+        }
+        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut lines = String::new();
+        let mut line = String::new();
+        while out.read_line(&mut line).unwrap() > 0 {
+            if let Some(id) = line.trim().strip_prefix("serving ") {
+                ids.insert(id.to_string());
+                break;
+            }
+            lines.push_str(&line);
+            line.clear();
+        }
+        children.push(child);
+        outputs.push(lines);
+    }
+    let answered: std::collections::BTreeSet<String> = (0..64).map(|_| get(shared, "/").1).collect();
+    for mut child in children {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    let in_use = "Error: Failed to start server. Is port PORT in use?\n";
+    assert_eq!(
+        outputs[0],
+        format!(
+            "shared true\n{}production shares true\nexclusive kept: Failed to start server. Is port PORT in use?\nrejoined true\n",
+            in_use.repeat(4)
+        )
+    );
+    assert_eq!(
+        outputs[1],
+        format!(
+            "shared true\nbound {{}}\n{}production shares true\njoined a port shared by default\nrejoined true\n",
+            in_use.repeat(3)
+        )
+    );
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_eq!(answered, ids);
+    let _ = std::fs::remove_dir_all(&dir);
+}

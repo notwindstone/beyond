@@ -179,6 +179,16 @@ static JSValue js_promise_settle(JSContext *c, JSValueConst this_val, int argc, 
     return JS_UNDEFINED;
 }
 
+// getEnv(name): the environment variable's value, or undefined.
+static JSValue js_get_env(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    const char *name = JS_ToCString(c, argv[0]);
+    if (!name)
+        return JS_EXCEPTION;
+    const char *v = getenv(name);
+    JS_FreeCString(c, name);
+    return v ? JS_NewString(c, v) : JS_UNDEFINED;
+}
+
 static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("setTimer", 3, js_set_timer),
     JS_CFUNC_DEF("clearTimer", 1, js_clear_timer),
@@ -188,6 +198,7 @@ static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("reportError", 1, js_report_error),
     JS_CFUNC_DEF("promiseNew", 0, js_promise_new),
     JS_CFUNC_DEF("promiseSettle", 3, js_promise_settle),
+    JS_CFUNC_DEF("getEnv", 1, js_get_env),
 };
 
 static int module_init(JSContext *c, JSModuleDef *m) {

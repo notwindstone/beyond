@@ -5,6 +5,7 @@
 import {
   bodyHandler,
   endStream,
+  getEnv,
   listen,
   requestDrop,
   requestPause,
@@ -31,6 +32,18 @@ type RouteValue = Response | Handler | Record<string, Response | Handler>;
 export interface ServeOptions {
   port?: number | string;
   hostname?: string;
+  /**
+   * Share the port with other servers that set it too, in this process or
+   * others (SO_REUSEPORT: the kernel spreads the connections across them).
+   * As Bun's, it defaults to on in a node:cluster worker (`NODE_UNIQUE_ID`
+   * set) and with `development: false`, otherwise off: the port is then
+   * this server's alone.
+   */
+  reusePort?: boolean;
+  /** Listen to IPv6 only (not to IPv4 too) when `hostname` is IPv6's. */
+  ipv6Only?: boolean;
+  /** Only whether it is `false` (production) is read: see `reusePort`. */
+  development?: boolean | object;
   fetch?: Handler;
   routes?: Record<string, RouteValue>;
   error?(error: unknown): Response | Promise<Response>;
@@ -431,12 +444,37 @@ function pathOf(url: string): string {
   return q < 0 ? url.slice(start) : url.slice(start, q);
 }
 
+// uSockets' listen options.
+const LISTEN_EXCLUSIVE_PORT = 1;
+const LISTEN_REUSE_PORT = 4;
+const SOCKET_IPV6_ONLY = 8;
+const LISTEN_REUSE_ADDR = 16;
+
+/** The listen options `options` asks for, read as Bun reads them. */
+function listenOptions(options: ServeOptions): number {
+  let reusePort = getEnv("NODE_UNIQUE_ID") !== undefined;
+  const development = options.development;
+  if (development !== undefined) reusePort = (development === null || typeof development !== "object") && !development;
+  if (options.reusePort !== undefined) reusePort = !!options.reusePort;
+  let out = reusePort ? LISTEN_REUSE_PORT | LISTEN_REUSE_ADDR : LISTEN_EXCLUSIVE_PORT;
+  if (options.ipv6Only) out |= SOCKET_IPV6_ONLY;
+  return out;
+}
+
+/** The port the environment names, read as Bun reads it. */
+function envPort(): number | undefined {
+  for (const name of ["BUN_PORT", "PORT", "NODE_PORT"]) {
+    const v = getEnv(name);
+    if (v !== undefined && /^[0-9]{1,5}$/.test(v) && Number(v) < 65536) return Number(v);
+  }
+  return undefined;
+}
+
 export function serve(options: ServeOptions): Server {
   if (typeof options?.fetch !== "function" && (options === null || typeof options !== "object" || options.routes === undefined)) {
     throw new TypeError("Expected `fetch` to be a function, or `routes`");
   }
-  const env = (globalThis as any).process?.env;
-  const port = Number(options.port ?? env?.PORT ?? 3000);
+  const port = Number(options.port ?? envPort() ?? 3000);
   const hostname = options.hostname ?? "0.0.0.0";
   let server: Server;
   const onError = (e: unknown): Response | Promise<Response> => {
@@ -509,7 +547,7 @@ export function serve(options: ServeOptions): Server {
     }
     return incoming;
   };
-  const id = listen(hostname, port, handler);
+  const id = listen(hostname, port, handler, listenOptions(options));
   if (id < 0) throw new Error(`Failed to start server. Is port ${port} in use?`);
   server = new Server(id, hostname);
   server.reload(options);

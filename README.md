@@ -62,7 +62,7 @@ decoder (libbrotlidec) and OpenSSL 3 (libssl, libcrypto).
   Bun's does.
 - `Bun` is `Beyond` (the same object), so code written for Bun's API runs
   as it is: `serve`, `sleep`, `randomUUIDv7`, `gc`, `inspect`, `version`.
-- `Beyond.serve({ port, hostname, fetch, routes, error })`, as `Bun.serve`: HTTP/1.1
+- `Beyond.serve({ port, hostname, fetch, routes, error, reusePort })`, as `Bun.serve`: HTTP/1.1
   on Bun's uSockets and uWebSockets, keep-alive and pipelining included. The
   `fetch` handler returns a `Response` or a promise of one. A request's
   body that comes with its head is handed to it whole; one still coming
@@ -81,6 +81,12 @@ decoder (libbrotlidec) and OpenSSL 3 (libssl, libcrypto).
   method a path does not handle goes to `fetch`, HEAD to its GET); a
   `Response` is sent as it is to every method, with Bun's etag (the
   xxHash64 of its body) and a 304 for a matching `If-None-Match`.
+  `reusePort`, as Bun's: servers that set it share their port, in one
+  process or several (SO_REUSEPORT, the kernel spreading the connections
+  across them), on by default with `development: false` or in a
+  node:cluster worker (`NODE_UNIQUE_ID` set); without it the port is the
+  server's alone. `ipv6Only` for an IPv6 `hostname`. Without `port`, the
+  port is `BUN_PORT`'s, `PORT`'s or `NODE_PORT`'s, else 3000, as Bun's.
 - `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
   picohttpparser), over TLS for `https:` (OpenSSL, on the socket through
   memory BIOs; Bun's bundled Mozilla root certificates trusted, with

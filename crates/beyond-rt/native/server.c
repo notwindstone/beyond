@@ -55,6 +55,7 @@ void beyond_js_report(void);
 typedef struct {
     uws_app_t *app;
     struct us_listen_socket_t *listen;
+    int port; // (still, once stopped, as Bun's `server.port`)
     JSValue handler; // (handle, method, url, headers, body) => void
 } Server;
 
@@ -850,10 +851,11 @@ static void on_listen(struct us_listen_socket_t *ls, void *user) {
     ((Server *)user)->listen = ls;
 }
 
-// listen(hostname, port, handler): the server's index, or -1.
+// listen(hostname, port, handler, options): the server's index, or -1.
+// `options`: uSockets' LIBUS_LISTEN_* and LIBUS_SOCKET_IPV6_ONLY.
 static JSValue js_listen(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv) {
-    int32_t port;
-    if (JS_ToInt32(ctx, &port, argv[1]))
+    int32_t port, flags;
+    if (JS_ToInt32(ctx, &port, argv[1]) || JS_ToInt32(ctx, &flags, argv[3]))
         return JS_EXCEPTION;
     if (nservers == MAX_SERVERS)
         return JS_ThrowRangeError(ctx, "too many servers");
@@ -865,7 +867,7 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
     srv->listen = NULL;
     srv->handler = JS_DupValue(ctx, argv[2]);
     uws_app_any(0, srv->app, "/*", 2, on_request, srv);
-    uws_app_listen_with_config(0, srv->app, host ? host : "", (uint16_t)port, 0, on_listen, srv);
+    uws_app_listen_with_config(0, srv->app, host ? host : "", (uint16_t)port, flags, on_listen, srv);
     if (host)
         JS_FreeCString(ctx, host);
     if (!srv->listen) {
@@ -873,6 +875,7 @@ static JSValue js_listen(JSContext *ctx, JSValueConst this_val, int argc, JSValu
         uws_app_destroy(0, srv->app);
         return JS_NewInt32(ctx, -1);
     }
+    srv->port = us_listen_socket_port(srv->listen);
     return JS_NewInt32(ctx, nservers++);
 }
 
@@ -880,9 +883,9 @@ static JSValue js_server_port(JSContext *ctx, JSValueConst this_val, int argc, J
     int32_t k;
     if (JS_ToInt32(ctx, &k, argv[0]))
         return JS_EXCEPTION;
-    if (k < 0 || k >= nservers || !servers[k].listen)
+    if (k < 0 || k >= nservers)
         return JS_NewInt32(ctx, 0);
-    return JS_NewInt32(ctx, us_listen_socket_port(servers[k].listen));
+    return JS_NewInt32(ctx, servers[k].port);
 }
 
 // stopServer(server, force): no new connections; as Bun's, idle ones are
@@ -907,7 +910,7 @@ static JSValue js_stop(JSContext *ctx, JSValueConst this_val, int argc, JSValueC
 }
 
 const JSCFunctionListEntry beyond_server_functions[] = {
-    JS_CFUNC_DEF("listen", 3, js_listen),
+    JS_CFUNC_DEF("listen", 4, js_listen),
     JS_CFUNC_DEF("serverPort", 1, js_server_port),
     JS_CFUNC_DEF("stopServer", 2, js_stop),
     JS_CFUNC_DEF("respond", 6, js_respond),
