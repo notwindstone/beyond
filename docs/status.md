@@ -36,6 +36,10 @@
   node:cluster worker (`NODE_UNIQUE_ID` set); without it the port is the
   server's alone. `ipv6Only` for an IPv6 `hostname`. Without `port`, the
   port is `BUN_PORT`'s, `PORT`'s or `NODE_PORT`'s, else 3000, as Bun's.
+- `await r.json()` where an `aot type` is expected (Luminous converts the
+  result to it): a `Request`'s or `Response`'s body is parsed to the type
+  directly, only its fields made (`parseJsonAs`; the general way, with its
+  errors, for anything else).
 - `fetch()`, as Bun's: HTTP/1.1 on uSockets (the response parsed with
   picohttpparser), over TLS for `https:` (OpenSSL, on the socket through
   memory BIOs; Bun's bundled Mozilla root certificates trusted, with

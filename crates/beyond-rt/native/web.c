@@ -110,6 +110,36 @@ static JSValue js_decode_utf8(JSContext *c, JSValueConst this_val, int argc, JSV
     return r;
 }
 
+// ---- JSON parsed to an `aot type` ----
+
+// Luminous's runtime (luminous_rt.h): typed parsing of UTF-8 JSON, and how
+// `await r.json()` whose result is converted to an `aot type` reads `r`.
+JSValue lum_json_parse_utf8_as(JSContext *ctx, const uint8_t *buf, size_t len, int32_t desc) __attribute__((weak));
+void lum_set_json_hook(JSContext *ctx, JSValueConst fn) __attribute__((weak));
+
+// parseJsonAs(bytes, desc): UTF-8 JSON parsed to the `aot type` `desc`
+// names, or undefined when only the general way can (JSON.parse, whose
+// result is then converted, with its errors).
+static JSValue js_parse_json_as(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    uint8_t *p;
+    size_t len;
+    int32_t desc;
+    if (!lum_json_parse_utf8_as)
+        return JS_UNDEFINED;
+    if (bytes_of(c, argv[0], &p, &len) || JS_ToInt32(c, &desc, argv[1]))
+        return JS_EXCEPTION;
+    JSValue v = lum_json_parse_utf8_as(c, p, len, desc);
+    return JS_IsUninitialized(v) ? JS_UNDEFINED : v;
+}
+
+// setJsonHook(fn): fn(r, desc) is `await r.json()` converted to an `aot
+// type`, or undefined for r.json().
+static JSValue js_set_json_hook(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    if (lum_set_json_hook)
+        lum_set_json_hook(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
 // ---- Random numbers ----
 
 // From the kernel (getrandom), through a buffer: bytes handed out are
@@ -364,6 +394,8 @@ const JSCFunctionListEntry beyond_web_functions[] = {
     JS_CFUNC_DEF("encodeUtf8", 1, js_encode_utf8),
     JS_CFUNC_DEF("encodeUtf8Into", 2, js_encode_utf8_into),
     JS_CFUNC_DEF("decodeUtf8", 2, js_decode_utf8),
+    JS_CFUNC_DEF("parseJsonAs", 2, js_parse_json_as),
+    JS_CFUNC_DEF("setJsonHook", 1, js_set_json_hook),
     JS_CFUNC_DEF("randomFill", 1, js_random_fill),
     JS_CFUNC_DEF("randomUUID", 0, js_random_uuid),
     JS_CFUNC_DEF("randomUUIDv7", 1, js_random_uuid_v7),

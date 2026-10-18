@@ -9,7 +9,7 @@
 // classes' constructors and methods to native code, the hot path of every
 // request the server answers.
 
-import { decodeUtf8, encodeUtf8, promiseNew, promiseSettle } from "beyond:native";
+import { decodeUtf8, encodeUtf8, parseJsonAs, promiseNew, promiseSettle, setJsonHook } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
@@ -432,6 +432,18 @@ function jsonOf(b: Stored | Uint8Array): any {
   return JSON.parse(textOf(b));
 }
 
+/**
+ * `jsonOf` where the result is converted to the `aot type` `desc` names:
+ * bytes parsed to it directly when they can be (only its fields read).
+ */
+function jsonAsOf(b: Stored | Uint8Array, desc: number): any {
+  if (b !== null && typeof b !== "string") {
+    const v = parseJsonAs(b, desc);
+    if (v !== undefined) return v;
+  }
+  return jsonOf(b);
+}
+
 function bodyUsedError(): TypeError {
   const e = new TypeError("Body already used");
   (e as any).code = "ERR_BODY_ALREADY_USED";
@@ -670,6 +682,24 @@ class Body {
     return resolved(v);
   }
 
+  /** `json()` whose result is converted to an `aot type` (see `jsonAsOf`). */
+  _jsonAs(desc: number): Promise<any> {
+    let c: Stored | Promise<Uint8Array>;
+    try {
+      c = this._consume();
+    } catch (e) {
+      return rejected(e);
+    }
+    if (c instanceof Promise) return c.then((b) => jsonAsOf(b, desc));
+    let v: any;
+    try {
+      v = jsonAsOf(c, desc);
+    } catch (e) {
+      return rejected(e);
+    }
+    return resolved(v);
+  }
+
   arrayBuffer(): Promise<ArrayBuffer> {
     let c: Stored | Promise<Uint8Array>;
     try {
@@ -742,6 +772,10 @@ export interface ResponseInit {
 
 const TEXT = "text/plain;charset=utf-8";
 const JSON_TYPE = "application/json;charset=utf-8";
+
+// `await r.json()` where Luminous converts the result to an `aot type`: a
+// body read and parsed to it directly.
+setJsonHook((r: unknown, desc: number) => (r instanceof Body ? r._jsonAs(desc) : undefined));
 
 export class Response extends Body {
   readonly status: number;

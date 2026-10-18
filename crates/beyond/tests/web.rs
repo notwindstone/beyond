@@ -51,6 +51,15 @@ fn body() {
 }
 
 #[test]
+fn typed_json() {
+    // `await r.json()` where an `aot type` is expected: the body parsed to
+    // it (no Bun equivalent: the expected output is the conversion's).
+    let (out, err, ok) = run("typed_json");
+    assert_eq!(out, expected("typed_json"));
+    assert!(ok, "{err}");
+}
+
+#[test]
 fn url() {
     let (out, err, ok) = run("url");
     assert_eq!(out, expected("url"));

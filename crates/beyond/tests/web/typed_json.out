@@ -1,0 +1,9 @@
+string {"id":1,"label":"café ☃","price":9.5,"tags":[{"t":"x"}],"owner":{"name":"Ann"}} 2 x Ann
+bytes {"id":1,"label":"café ☃","price":9.5,"tags":[{"t":"x"}],"owner":{"name":"Ann"}} 2 x Ann
+stream {"id":1,"label":"café ☃","price":9.5,"tags":[{"t":"x"}],"owner":{"name":"Ann"}} 2 x Ann
+request {"id":1,"label":"café ☃","price":9.5,"tags":[{"t":"x"}],"owner":{"name":"Ann"}} 2 x Ann
+bad type TypeError: `id` of aot type `Item` cannot hold this value
+bad json SyntaxError: Unexpected end of JSON input
+invalid utf-8 {"id":1,"label":"caf�� ☃","price":9.5,"tags":[{"t":"x"}],"owner":{"name":"Aÿn"}} 2 x Aÿn
+used TypeError: Body already used
+plain true

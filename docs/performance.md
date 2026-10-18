@@ -79,6 +79,42 @@ encoded once). All use 21–29 MB. What got it there:
   `aot type`, and arrays of them, are written from their fields: a small
   one in about the time Bun takes, 100 of them in about half
   (`Response.json` of them too).
+## Typed data (`aot type`)
+
+Arrays of 1,000 objects `{ id: int, x: number, name: string }`, `xs[i].x +
+xs[i].id` over them in a native function, nanoseconds an element (two runs;
+this VM's speed moves by up to 2x between runs here):
+
+| | Beyond | Bun 1.4.3 |
+|---|---:|---:|
+| `aot type X = Array<A>` (A an `aot type`) | 1.5–4.3 | 3.0–3.6 |
+| `type Y = Array<A>` (a plain alias of the same) | 1.4–3.9 | 2.7–4.2 |
+| `type Z = Array<B>` (plain objects) | 15–21 | 2.7–4.8 |
+| `Object.freeze` of an array of plain objects | 43–61 | 44–53 |
+
+A plain alias of an array of an `aot type` is that type (it was read as an
+untyped array: 22–27 ns). Untyped objects are where Bun's JIT is ahead (its
+inline caches; Beyond's are the engine's). A frozen array is slow in both:
+freezing makes QuickJS's array, and JSC's, a dictionary of properties.
+`Object.freeze` of an array of `aot type` objects throws (it cannot
+redefine its elements), and `Object.keys(o).length` makes the array of
+keys: 42–46 ns for a 5-field plain object (Bun: 15 ns), 311–342 ns for an
+`aot type` object.
+
+`JSON.parse(text)` and `await r.json()` where an `aot type` is expected
+parse to it directly (only its fields made: Luminous's README, "From
+JSON"); the same text plain, and Bun's (two runs):
+
+| | typed | plain | Bun |
+|---|---:|---:|---:|
+| `JSON.parse`, one object of 6 fields (one nested) | 695–738 ns | 1,424–1,995 ns | 342–399 ns |
+| `JSON.parse`, 50 of them with 3 fields the type lacks (6.6 KB) | 52.7–54.6 µs | 141–158 µs | 46.6–60.6 µs |
+| `Response#json()`, the same 50 from bytes | 57.9–67.5 µs | 165–197 µs | 58.2–76.5 µs |
+
+Typed, the 50 objects parse in about a third of the time a plain parse
+takes, as fast as Bun's plain parse; one small object, in half the time,
+but twice Bun's.
+
 ## Hono
 
 A Hono 4.13 app (bench/hono: text, JSON and path parameter routes, and a
