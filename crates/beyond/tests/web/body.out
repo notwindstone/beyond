@@ -176,3 +176,9 @@ false false
 "application/x-www-form-urlencoded;charset=UTF-8" "application/x-www-form-urlencoded;charset=UTF-8"
 "Text/X; Charset=UTF-8" "text/y"
 "text/plain;charset=utf-8" "text/plain;charset=utf-8"
+{"a":1,"b":[true,null,"x"],"c":{"d":-0.5}} ["é","😀","é",{"ü":"ß"}]
+"a�b" "���"
+1 SyntaxError SyntaxError 42
+40 true id,name,tags,n
+"1" 1 "﻿b"
+SyntaxError

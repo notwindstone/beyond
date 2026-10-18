@@ -110,6 +110,31 @@ static JSValue js_decode_utf8(JSContext *c, JSValueConst this_val, int argc, JSV
     return r;
 }
 
+// ---- JSON from bytes ----
+
+// A body's JSON text: its UTF-8 bytes but a byte order mark (which UTF-8
+// decode drops).
+static void json_text(uint8_t **p, size_t *len) {
+    if (*len >= 3 && (*p)[0] == 0xef && (*p)[1] == 0xbb && (*p)[2] == 0xbf) {
+        *p += 3;
+        *len -= 3;
+    }
+}
+
+// parseJson(bytes): JSON.parse of the text UTF-8 bytes decode to, parsed
+// from the bytes (the engine's fast path), or undefined when they need
+// decoding first (invalid UTF-8, anything the fast path leaves to the
+// general parser: then decodeUtf8 and JSON.parse, with its errors).
+static JSValue js_parse_json(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    uint8_t *p;
+    size_t len;
+    if (bytes_of(c, argv[0], &p, &len))
+        return JS_EXCEPTION;
+    json_text(&p, &len);
+    JSValue v = JS_ParseJSONUTF8Fast(c, p, len);
+    return JS_IsUninitialized(v) ? JS_UNDEFINED : v;
+}
+
 // ---- JSON parsed to an `aot type` ----
 
 // Luminous's runtime (luminous_rt.h): typed parsing of UTF-8 JSON, and how
@@ -128,6 +153,7 @@ static JSValue js_parse_json_as(JSContext *c, JSValueConst this_val, int argc, J
         return JS_UNDEFINED;
     if (bytes_of(c, argv[0], &p, &len) || JS_ToInt32(c, &desc, argv[1]))
         return JS_EXCEPTION;
+    json_text(&p, &len);
     JSValue v = lum_json_parse_utf8_as(c, p, len, desc);
     return JS_IsUninitialized(v) ? JS_UNDEFINED : v;
 }
@@ -394,6 +420,7 @@ const JSCFunctionListEntry beyond_web_functions[] = {
     JS_CFUNC_DEF("encodeUtf8", 1, js_encode_utf8),
     JS_CFUNC_DEF("encodeUtf8Into", 2, js_encode_utf8_into),
     JS_CFUNC_DEF("decodeUtf8", 2, js_decode_utf8),
+    JS_CFUNC_DEF("parseJson", 1, js_parse_json),
     JS_CFUNC_DEF("parseJsonAs", 2, js_parse_json_as),
     JS_CFUNC_DEF("setJsonHook", 1, js_set_json_hook),
     JS_CFUNC_DEF("randomFill", 1, js_random_fill),

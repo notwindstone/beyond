@@ -90,3 +90,27 @@ console.log(new Headers({ "10": "a", z: "b", "2": "c" }).toJSON());
   const req = async (r: Request) => JSON.stringify((await r.blob()).type);
   console.log(await req(new Request("http://x/", { method: "POST", body: new Uint8Array([1]) })), await req(new Request("http://x/", { method: "POST", body: "s" })));
 }
+// json() of bytes: parsed from them (the same values as decoding them first).
+{
+  const enc = (s: string) => new TextEncoder().encode(s);
+  const json = async (b: Uint8Array) => {
+    try {
+      return JSON.stringify(await new Response(b).json());
+    } catch (e) {
+      return (e as Error).constructor.name;
+    }
+  };
+  console.log(await json(enc(`{"a":1,"b":[true,null,"x"],"c":{"d":-0.5}}`)), await json(enc(`["é","😀","\\u00e9",{"ü":"ß"}]`)));
+  console.log(await json(new Uint8Array([0x22, 0x61, 0xff, 0x62, 0x22])), await json(new Uint8Array([0x22, 0xed, 0xa0, 0x80, 0x22])));
+  console.log(await json(new Uint8Array([0xef, 0xbb, 0xbf, 0x31])), await json(enc(`{"a":1,}`)), await json(enc(``)), await json(enc(` 42 `)));
+  const many = JSON.stringify(Array.from({ length: 40 }, (_, i) => ({ id: i, name: "n" + i, tags: ["a"], n: i * 1.5 })));
+  const back = await new Request("http://x/", { method: "POST", body: enc(many) }).json();
+  console.log(back.length, JSON.stringify(back) === many, Object.keys(back[39]).join());
+}
+
+// A byte order mark: dropped from bytes (UTF-8 decode), not from text.
+{
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf, 0x31]);
+  console.log(JSON.stringify(await new Response(bom).text()), await new Response(bom).json(), JSON.stringify(await new Response("﻿b").text()));
+  console.log(await new Response("﻿2").json().catch((e: Error) => e.constructor.name));
+}

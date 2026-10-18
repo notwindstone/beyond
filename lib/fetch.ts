@@ -9,7 +9,7 @@
 // classes' constructors and methods to native code, the hot path of every
 // request the server answers.
 
-import { decodeUtf8, encodeUtf8, parseJsonAs, promiseNew, promiseSettle, setJsonHook } from "beyond:native";
+import { decodeUtf8, encodeUtf8, parseJson, parseJsonAs, promiseNew, promiseSettle, setJsonHook } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { encodeMultipart, FormData, parseForm } from "./formdata.ts";
 import { describe, Formatter } from "./inspect.ts";
@@ -421,14 +421,20 @@ function rejected<T>(e: unknown): Promise<T> {
   return p;
 }
 
-/** A body's text: as stored, or its bytes decoded. */
+/** A body's text: as stored, or its bytes decoded (UTF-8 decode: a byte order mark dropped). */
 function textOf(b: Stored | Uint8Array): string {
   if (b === null) return "";
   if (typeof b === "string") return b;
-  return decodeUtf8(b, false);
+  const t = decodeUtf8(b, false);
+  return t.charCodeAt(0) === 0xfeff ? t.slice(1) : t;
 }
 
 function jsonOf(b: Stored | Uint8Array): any {
+  if (b !== null && typeof b !== "string") {
+    // (From the bytes, not decoded first: the same value.)
+    const v = parseJson(b);
+    if (v !== undefined) return v;
+  }
   return JSON.parse(textOf(b));
 }
 

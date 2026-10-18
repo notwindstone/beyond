@@ -100,9 +100,11 @@ fast as before (Luminous's patch `0023`: it made QuickJS's array a
 dictionary of properties, 43–61 ns, as freezing does JSC's), and an array
 of `aot type` objects freezes and seals as a whole (it threw).
 `Object.keys(o).length` counts the keys without making the array (patch
-`0022`): 14 ns for a 5-field plain object (42–46 before), 15 ns for an
-`aot type` object (311–342 before); Bun 13–15 ns. Counting them with
-`for`-`in` is still 144–152 ns (Bun: 11–17).
+`0022`): 13–16 ns for a 5-field plain object (42–46 before), 15–16 ns for
+an `aot type` object (311–342 before); Bun 13–23 ns. Counting them with
+`for`-`in` takes 25–30 ns (144–152 before; Bun 11–22): native code steps
+through the keys of the object's shape, shared by every loop over objects
+of that shape, without a call or an allocation per loop (patch `0024`).
 
 `JSON.parse(text)` and `await r.json()` where an `aot type` is expected
 parse to it directly (only its fields made: Luminous's README, "From
@@ -110,15 +112,19 @@ JSON"); the same text plain, and Bun's (two runs):
 
 | | typed | plain | Bun |
 |---|---:|---:|---:|
-| `JSON.parse`, one object of 6 fields (one nested) | 329–350 ns | 1,470–1,516 ns | 343–381 ns |
-| `JSON.parse`, 50 of them with 3 fields the type lacks (6.6 KB) | 31.3–32.2 µs | 146–148 µs | 45.5–45.9 µs |
-| `Response#json()`, the same 50 from bytes | 35.7–37.4 µs | 145–163 µs | 57.5–60.8 µs |
+| `JSON.parse`, one object of 6 fields (one nested) | 330–343 ns | 308–311 ns | 349–368 ns |
+| `JSON.parse`, 50 of them with 3 fields the type lacks (6.6 KB) | 30.8–31.4 µs | 33.2–34.5 µs | 43.8–49.9 µs |
+| `Response#json()`, the same 50 from bytes | 37.6–38.3 µs | 41.3–42.2 µs | 61.0–64.1 µs |
 
 Typed, one small object parses as fast as Bun's parse, and the 50 objects
 in about 70% of its time (60% from a body). Before the parser's numbers,
 keys, strings and checks were made cheaper (5,927 instructions for the
 small object, now 2,985), the small one took 695–738 ns and the 50
-52.7–54.6 µs. Plain, QuickJS's `JSON.parse` takes four times Bun's.
+52.7–54.6 µs. Plain, `JSON.parse` took four times Bun's (1,470–1,516 ns,
+146–148 µs, from a body 145–163 µs): Luminous's patch `0024` parses the
+text's bytes in place and makes objects with the shape of the last ones
+with the same keys (13,013 instructions for the small object, now 3,053),
+and `json()` parses a body's bytes without decoding them first.
 
 ## Hono
 
