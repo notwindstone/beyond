@@ -300,6 +300,51 @@ functions compile: the same bundle with that function kept interpreted,
 run alternately with it, answers 52,300 and 44,200 requests a second
 (text, `/users/:id`) where it answers 63,300 and 48,700.
 
+The same Hono and Elysia apps on one and on two server processes sharing
+port 3000 (`reusePort: true`), each process pinned to a core of its own
+(cores 2 and 3, `taskset`) and `wrk -t2 -c50` pinned to the other two:
+3 seconds of warm-up, then 10 measured, the mean of two rounds. The
+servers are the limit here: they use 195–199% of their two cores, wrk at
+most 125% of its two. (Pinned, Bun's compiler and collector threads
+share its server's core.)
+
+Hono:
+
+| servers | path | Beyond | Bun | Beyond / Bun |
+|---|---|---:|---:|---:|
+| 1 | `/` | 28,352 | 27,300 | 104% |
+| 1 | `/json` | 25,672 | 21,646 | 119% |
+| 1 | `/users/42` | 23,414 | 21,066 | 111% |
+| 2 | `/` | 63,172 | 59,151 | 107% |
+| 2 | `/json` | 57,751 | 52,314 | 110% |
+| 2 | `/users/42` | 50,890 | 44,544 | 114% |
+
+Elysia 2, Bun on the bundle built with the AOT plugin (as Beyond) and on
+the app as written:
+
+| servers | path | Beyond | Bun, AOT | Bun, as written | Beyond / Bun, AOT |
+|---|---|---:|---:|---:|---:|
+| 1 | `/` | 42,976 | 38,405 | 39,312 | 112% |
+| 1 | `/json` | 38,488 | 32,451 | 32,568 | 119% |
+| 1 | `/users/42` | 33,410 | 30,730 | 28,893 | 109% |
+| 2 | `/` | 87,218 | 81,942 | 77,162 | 106% |
+| 2 | `/json` | 80,702 | 67,647 | 69,280 | 119% |
+| 2 | `/users/42` | 77,776 | 64,357 | 68,856 | 121% |
+
+Memory (RSS, the servers' together):
+
+| | 1 server | 2 servers |
+|---|---:|---:|
+| Hono, Beyond | 28 MB | 57 MB |
+| Hono, Bun | 42 MB | 84 MB |
+| Elysia, Beyond | 31 MB | 62 MB |
+| Elysia, Bun, AOT | 38 MB | 76 MB |
+| Elysia, Bun, as written | 42 MB | 85 MB |
+
+Two servers answer 2.0–2.4 times what one does, Beyond's and Bun's alike
+(above twice on this VM for both, so the ratios hold). A run moves by up
+to 10–15% between rounds: read each ratio as about ±5%.
+
 `fetch()` against Bun's: 300,000 fetches of a short text from a Beyond
 server in another process, 1, 10 or 50 of them in flight, each response
 read with `text()` (bench/fetch.ts), three rounds a run, two runs each:
