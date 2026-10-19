@@ -126,6 +126,34 @@ text's bytes in place and makes objects with the shape of the last ones
 with the same keys (13,013 instructions for the small object, now 3,053),
 and `json()` parses a body's bytes without decoding them first.
 
+## Objects: `{}` and `Object.create(null)`
+
+Native functions over 2,000,000 iterations (`bench/objects.ts`: best of
+five, nanoseconds an iteration; one run of each, the same minute, as this
+VM's speed moves between runs):
+
+| | `{}` | `Object.create(null)` | Bun (`{}` / null) |
+|---|---:|---:|---:|
+| a new empty object | 3.5 | 4.6 | 0.4 / 0.4 |
+| a new one, 3 keys added, 2 read | 18.2–18.6 | 20.3 | 1.3–1.8 / 1.1–1.2 |
+| a dictionary of 64 dynamic keys (a key set, then read) | 25.2–25.3 | 24.1–24.8 | 16.7–16.9 / 15.5–17.3 |
+| 2 keys read and a missing one | 8.5 | 8.5–8.9 | 0.3 / 1.2–1.5 |
+
+`Object.create(p)` is made as `{}` is, while it is the builtin: the site
+keeps the empty shape of its prototype and allocates inline (an iteration
+making one: about 290 instructions, now 81; `{}`, 40). An addition a site
+cached is made inline (the shape after and the value stored), and an
+empty object has room for 4 properties in its cell: a new object with 3
+keys added and 2 read, about 600 instructions (870 from
+`Object.create(null)`), now 342 (381). A dictionary's keys: a shape
+transition found in the table was checked property by property (about
+2,000 comparisons for 64 keys), now once; `d[k]` with a key string the
+engine has seen reads and writes an ordinary object's properties without
+the general lookup: about 515 instructions a key, now about 225. Luminous's
+patch `0025` and README. Bun's JIT makes the first two rows nearly free by
+not allocating the objects at all; a missing key is read through a call
+here (a cached absence is not checked inline yet).
+
 ## Hono
 
 A Hono 4.13 app (bench/hono: text, JSON and path parameter routes, and a
