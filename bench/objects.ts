@@ -23,6 +23,16 @@ function fixedNull(): number {
   for (let i = 0; i < N; i++) { const o: any = Object.create(null); o.a = i; o.b = 2; o.c = 3; s += o.a + o.c; }
   return s;
 }
+function make(i: number): any {
+  const o: any = {};
+  o.a = i; o.b = 2; o.c = 3;
+  return o;
+}
+function returnedLit(): number {
+  let s = 0;
+  for (let i = 0; i < N; i++) s += make(i).a;
+  return s;
+}
 function dictLit(): number {
   let s = 0;
   for (let r = 0; r < N / 64; r++) {
@@ -62,6 +72,7 @@ time("new empty object: {}", N, emptyLit);
 time("new empty object: Object.create(null)", N, emptyNull);
 time("new + 3 props + 2 reads: {}", N, fixedLit);
 time("new + 3 props + 2 reads: Object.create(null)", N, fixedNull);
+time("3 keys added to {}, returned, 1 read", N, returnedLit);
 time("dictionary, 64 dynamic keys (per key): {}", N, dictLit);
 time("dictionary, 64 dynamic keys (per key): null", N, dictNull);
 time("read 2 props + 1 missing: {}", N, readLit);

@@ -129,30 +129,46 @@ and `json()` parses a body's bytes without decoding them first.
 ## Objects: `{}` and `Object.create(null)`
 
 Native functions over 2,000,000 iterations (`bench/objects.ts`: best of
-five, nanoseconds an iteration; one run of each, the same minute, as this
-VM's speed moves between runs):
+five, nanoseconds an iteration). Before and now were measured in the same
+minute, with the previous Luminous and this one; this VM ran slower than
+for the figures in earlier versions of this table (a dictionary: 25 ns
+then, 32–38 now, with either):
 
-| | `{}` | `Object.create(null)` | Bun (`{}` / null) |
+| | `{}` before → now | `Object.create(null)` before → now | Bun (`{}` / null) |
 |---|---:|---:|---:|
-| a new empty object | 3.5 | 4.6 | 0.4 / 0.4 |
-| a new one, 3 keys added, 2 read | 18.2–18.6 | 20.3 | 1.3–1.8 / 1.1–1.2 |
-| a dictionary of 64 dynamic keys (a key set, then read) | 25.2–25.3 | 24.1–24.8 | 16.7–16.9 / 15.5–17.3 |
-| 2 keys read and a missing one | 8.5 | 8.5–8.9 | 0.3 / 1.2–1.5 |
+| a new empty object | 4.9–5.0 → 1.1–1.4 | 8.1–9.1 → 4.0–4.1 | 0.4 / 0.4 |
+| a new one, 3 keys added, 2 read | 26.7–27.9 → 8.8 | 31.2–34.2 → 9.8–10.3 | 1.3–1.4 / 1.3 |
+| 3 keys added to `{}` by a function that returns it, 1 read | 24.1–26.6 → 12.8–13.0 | | 1.3 |
+| a dictionary of 64 dynamic keys (a key set, then read) | 34.2–35.7 → 35.3–38.0 | 32.6–34.6 → 32.0–34.1 | 17.4–17.5 / 16.9–17.7 |
+| 2 keys read and a missing one | 12.4–13.1 → 10.9–11.2 | 12.5–13.0 → 10.7–11.1 | 0.4 / 1.6–1.7 |
 
-`Object.create(p)` is made as `{}` is, while it is the builtin: the site
-keeps the empty shape of its prototype and allocates inline (an iteration
-making one: about 290 instructions, now 81; `{}`, 40). An addition a site
-cached is made inline (the shape after and the value stored), and an
-empty object has room for 4 properties in its cell: a new object with 3
-keys added and 2 read, about 600 instructions (870 from
-`Object.create(null)`), now 342 (381). A dictionary's keys: a shape
-transition found in the table was checked property by property (about
-2,000 comparisons for 64 keys), now once; `d[k]` with a key string the
-engine has seen reads and writes an ordinary object's properties without
-the general lookup: about 515 instructions a key, now about 225. Luminous's
-patch `0025` and README. Bun's JIT makes the first two rows nearly free by
-not allocating the objects at all; a missing key is read through a call
-here (a cached absence is not checked inline yet).
+An object that stays in its function is not made at all now (Luminous's
+`virtualize_objects`, as Bun's JIT does): its properties live in locals,
+an addition to an object of `Object.prototype` is checked against a
+setter or read-only property of the key there (one comparison while no
+watched prototype changed), and a key `Object.create(null)` was not
+given reads `undefined`. Where the object itself is needed (passed,
+returned, a key it lacks) it is made then, once, from the properties it
+has: a function that fills `{}` and returns it makes the object with its
+final shape in one go. Instructions an iteration: a new `{}` with 3 keys
+added and 2 read, 342 → 53 (`Object.create(null)`: 381 → 83); a new
+empty `{}`, 40 → 8; the function that returns it, 322 → 116. What is left
+is the arithmetic on untyped values and, for `Object.create(null)`,
+reading `Object.create` each iteration, which Bun's JIT hoists out of the
+loop.
+
+`Object.create(p)` that escapes is made as `{}` is, while it is the
+builtin: the site keeps the empty shape of its prototype and allocates
+inline. An addition a site cached is made inline (the shape after and the
+value stored), and an empty object has room for 4 properties in its cell.
+A dictionary's keys: a shape transition found in the table was checked
+property by property (about 2,000 comparisons for 64 keys), now once;
+`d[k]` with a key string the engine has seen reads and writes an ordinary
+object's properties without the general lookup (about 515 instructions a
+key, now about 225). A missing key is now read from the site's cache
+inline, without a call (156 instructions an iteration, now 123); Bun
+hoists these reads out of the loop entirely. Luminous's patch `0025` and
+README.
 
 ## Hono
 
