@@ -1,0 +1,15 @@
+[package]
+name = "beyond-build"
+description = "Beyond.build's bundler and transpiler (Luminous's), loaded by programs that use them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "beyond_build"
+crate-type = ["cdylib"]
+
+[dependencies]
+luminous-front = { path = "../../vendor/luminous/crates/luminous-front" }
+oxc = { version = "0.153.0", features = ["transformer", "codegen", "semantic"] }
+serde_json = { version = "1", features = ["preserve_order"] }

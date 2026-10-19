@@ -1,5 +1,6 @@
 // Bundles app.ts with Elysia's AOT plugin (its handlers composed at build
-// time) into dist/app.js, which Beyond compiles: bun build.ts
+// time) into dist/app.js, which Beyond compiles: `beyond run --no-native
+// build.ts` (or `bun build.ts`), then `beyond build dist/app.js`.
 import { aot } from "elysia/plugin/aot/bun";
 
 const result = await Bun.build({

@@ -1,0 +1,28 @@
+/a/c/d.ts /x/z ../../d
+/a/b c .gz / :
+{"root":"/","dir":"/home/u","base":"file.txt","ext":".txt","name":"file"} /x/y.js false
+/a/c true function
+file:///tmp/a%20b.txt /tmp/a b.txt true
+alpha+beta [ 1, 2, 3 ]
+true false [ "a.txt", "sub" ]
+a.txt:file sub:dir
+10 true false number true
+ENOENT open -2 <work>/missing.txt ENOENT: no such file or directory, open '<work>/missing.txt'
+[ "d.txt", "sub" ] <work>/dir/d.txt
+{
+  ok: true,
+} 11
+false function
+13 68c3a96c6c6f2077c3b6726c64 aMOpbGxvIHfDtnJsZA== hi
+ab 6 héll
+true true 1,1,1 true
+on 1, once 1, on 2 1 [ "x" ]
+once [ 42 ]
+"\n" true number string LE
+string 3 number bigint true
+true true true false function
+a/b {"n":1,"list":["x"]} object true
+. node.ts ./node.ts file://./dynamic.ts
+hello from dynamic.ts 42
+7 written 7 text/plain;charset=utf-8
+false true 1

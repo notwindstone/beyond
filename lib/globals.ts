@@ -2,7 +2,7 @@
 // has some of the web's own: queueMicrotask, atob and btoa, DOMException,
 // performance.
 
-import { gc as nativeGC, now, randomUUIDv7 as nativeUUIDv7 } from "beyond:native";
+import { buildTranspile, gc as nativeGC, now, randomUUIDv7 as nativeUUIDv7 } from "beyond:native";
 import { Blob, File } from "./blob.ts";
 import { structuredClone } from "./clone.ts";
 import { console } from "./console.ts";
@@ -10,6 +10,10 @@ import { Crypto, crypto } from "./crypto.ts";
 import { TextDecoder, TextDecoderStream, TextEncoder, TextEncoderStream } from "./encoding.ts";
 import { AbortController, AbortSignal, CustomEvent, Event, EventTarget, reportError } from "./events.ts";
 import { Headers, Request, Response } from "./fetch.ts";
+import { file, write } from "./file.ts";
+import { builtinModule, libModule } from "./modules.ts";
+import { Buffer } from "./node/buffer.ts";
+import { process } from "./process.ts";
 import { FormData } from "./formdata.ts";
 import { inspect } from "./inspect.ts";
 import { serve } from "./serve.ts";
@@ -81,6 +85,9 @@ define("Request", Request);
 define("Response", Response);
 define("fetch", fetch);
 if (g.self === undefined) define("self", globalThis);
+define("process", process);
+define("Buffer", Buffer);
+(globalThis as any)[Symbol.for("beyond.builtin")] = builtinModule;
 /** Bun.sleep: a promise fulfilled after `ms` milliseconds (or at a Date). */
 function sleep(ms: number | Date): Promise<void> {
   const delay = ms instanceof Date ? ms.getTime() - Date.now() : Number(ms);
@@ -109,7 +116,43 @@ function gc(_force?: boolean): void {
   nativeGC();
 }
 
-const runtime = { serve, inspect, version: "0.1.0", sleep, randomUUIDv7, gc };
+/** Bun.Transpiler: TypeScript and JSX made JavaScript. */
+class Transpiler {
+  #loader: string;
+  constructor(options?: { loader?: string }) {
+    this.#loader = options?.loader ?? "tsx";
+  }
+  transformSync(code: string, loader?: string): string {
+    const l = loader ?? this.#loader;
+    const r = JSON.parse(buildTranspile(JSON.stringify({ path: "input." + l, source: code, loader: l })) as string);
+    if (r.error !== undefined) throw new SyntaxError(r.error);
+    return r.code;
+  }
+  async transform(code: string, loader?: string): Promise<string> {
+    return this.transformSync(code, loader);
+  }
+}
+
+const runtime = {
+  serve,
+  inspect,
+  version: "0.1.0",
+  sleep,
+  randomUUIDv7,
+  gc,
+  /** Bun.build: lib/build.ts, loaded when first used. */
+  async build(config: any): Promise<any> {
+    return (await libModule("build.ts")).build(config);
+  },
+  file,
+  write,
+  Transpiler,
+  env: process.env,
+  argv: process.argv,
+  get main(): string {
+    return process.argv[1] ?? "";
+  },
+};
 define("Beyond", runtime);
 // Code written for Bun runs as it is: `Bun` is `Beyond`.
 define("Bun", runtime);

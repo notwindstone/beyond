@@ -1,0 +1,21 @@
+builder addPreload,config,esbuild,initialOptions,module,onBeforeParse,onDispose,onEnd,onLoad,onResolve,onStart,resolve
+config ./a.ts bun
+start
+resolve virtual:hello from ./a.ts file import-statement
+load ./b.ts file ts
+load hello virtual
+end true 1
+result true 1 0
+artifact <out>/a.js entry-point ts text/javascript;charset=utf-8 false
+header true
+unusedFunction true
+pure-lib unused false
+effects-lib true
+path import true
+main() [42,7,"some text","hi from hello","x/y","used","1.2.3"] 42
+ran true undefined
+threw AggregateError Bundle failed 1
+message ResolveMessage error Could not resolve: "./does-not-exist.ts"
+position 1 22 import { nope } from "./does-not-exist.ts"; ./broken.ts
+throw: false false 0 1 Could not resolve: "./does-not-exist.ts"
+in memory 1 ./b.js true

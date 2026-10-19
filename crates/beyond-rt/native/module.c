@@ -29,6 +29,11 @@ extern const JSCFunctionListEntry beyond_server_functions[];
 extern const int beyond_server_function_count;
 extern const JSCFunctionListEntry beyond_web_functions[];
 extern const int beyond_web_function_count;
+extern const JSCFunctionListEntry beyond_system_functions[];
+extern const int beyond_system_function_count;
+void beyond_system_init(int argc, char **argv);
+void beyond_system_install_loader(JSContext *c);
+void beyond_system_mark(JSRuntime *rt, JS_MarkFunc *mark);
 
 // Promises rejected with no handler yet, and their reasons: reported once
 // the jobs running now are done, unless a handler is added by then.
@@ -36,6 +41,7 @@ static JSValue *rejected;
 static int nrejected, cap_rejected;
 
 static void mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
+    beyond_system_mark(rt, mark_func);
     (void)opaque;
     JS_MarkValue(rt, on_timer, mark_func);
     for (int i = 0; i < nrejected; i++)
@@ -206,6 +212,8 @@ static int module_init(JSContext *c, JSModuleDef *m) {
         return -1;
     if (JS_SetModuleExportList(c, m, beyond_web_functions, beyond_web_function_count))
         return -1;
+    if (JS_SetModuleExportList(c, m, beyond_system_functions, beyond_system_function_count))
+        return -1;
     if (JS_SetModuleExportList(c, m, beyond_client_functions, beyond_client_function_count))
         return -1;
     return JS_SetModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
@@ -216,6 +224,7 @@ JSModuleDef *js_init_module_beyond(JSContext *c, const char *name) {
     if (m) {
         JS_AddModuleExportList(c, m, functions, sizeof functions / sizeof *functions);
         JS_AddModuleExportList(c, m, beyond_web_functions, beyond_web_function_count);
+        JS_AddModuleExportList(c, m, beyond_system_functions, beyond_system_function_count);
         JS_AddModuleExportList(c, m, beyond_client_functions, beyond_client_function_count);
         JS_AddModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
     }
@@ -225,7 +234,8 @@ JSModuleDef *js_init_module_beyond(JSContext *c, const char *name) {
 // ---- The program's hooks ----
 
 int beyond_init(JSContext *c, int argc, char **argv) {
-    (void)argc, (void)argv;
+    beyond_system_init(argc, argv);
+    beyond_system_install_loader(c);
     ctx = c;
     on_timer = JS_UNDEFINED;
     JS_SetHostPromiseRejectionTracker(JS_GetRuntime(c), track_rejection, NULL);

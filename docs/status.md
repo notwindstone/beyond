@@ -106,22 +106,60 @@
 - `crypto.getRandomValues` and `crypto.randomUUID` (from the kernel, through
   a buffer), `structuredClone` (with `transfer`), `self`; and from
   QuickJS-NG, `queueMicrotask`, `atob`, `btoa`, `DOMException`.
+- `Beyond.build(config)`, as `Bun.build`: entry points bundled into ES
+  modules by Luminous's bundler (scope hoisting, tree shaking as Bun's:
+  statement by statement, a package's `sideEffects` honored), with Bun's
+  plugin API (`onStart`, `onResolve` and `onLoad` with filters and
+  namespaces, async callbacks, `onEnd`, `build.module` for virtual
+  modules, `build.resolve`, `config`), the js, jsx, ts, tsx, json,
+  jsonc, text and file loaders, `outdir`, `naming`, `root`, `target`
+  (Node's built-in modules stay imports but for the browser), `external`,
+  `packages: "external"`, `define`, `banner`, `footer`, `conditions` and
+  `minify.whitespace`; its results are Bun's (`BuildOutput`,
+  `BuildArtifact`, `BuildMessage` and `ResolveMessage` with their
+  positions, an `AggregateError` thrown unless `throw: false`). The
+  bundler is in a library of its own (`libbeyond_build.so`, next to
+  `beyond`), which a program loads, with `lib/build.ts`, the first time it
+  calls `Beyond.build`: programs that do not are none the bigger.
+- Node's modules that build scripts and their packages use: `node:path`,
+  `node:fs` (synchronous, callback and promise functions, `Stats`,
+  `Dirent`, Node's errors), `node:fs/promises`, `node:url`, `node:events`
+  (`EventEmitter`, `once`), `node:buffer` (`Buffer`, also a global),
+  `node:os`, `node:process` (and the `process` global: `argv`, `env`,
+  `cwd`, `exit`, `hrtime`, `nextTick`, `getBuiltinModule`),
+  `node:module` (`createRequire`: CommonJS modules and JSON),
+  `node:worker_threads` (the main thread's values); their bare names
+  (`fs`) too. `Bun.file` (a `Blob` read when asked: `text`, `json`,
+  `bytes`, `exists`, `stat`, `delete`) and `Bun.write`.
+- `import()` of a specifier known only at run time, and `import.meta.resolve`:
+  resolved as Bun resolves it, the module loaded then (TypeScript and JSX
+  made JavaScript by the build library, CommonJS required) and
+  interpreted; a module of the program that it imports is the program's
+  own instance.
 ## Tests
 
 The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT
-URL data and streams tests, a server answering over TCP, and `fetch()`
-against a server of the test's own.
+URL data and streams tests, a server answering over TCP, `fetch()`
+against a server of the test's own, and a `Beyond.build` with plugins,
+loaders, tree shaking and errors, and the Node modules, against Bun's
+output.
 ## Elysia
 
-Elysia 2 (`bench/elysia`) runs on Beyond: its AOT plugin for `Bun.build`
-composes the handlers at build time (`bun build.ts`), so the bundle makes no
-function with `new Function` at run time, and `beyond build dist/app.js`
-compiles it; Elysia takes its Bun adapter (`Bun.serve` with `routes` and
+Elysia 2 (`bench/elysia`) runs on Beyond, and builds on it: its AOT
+plugin for `Bun.build` composes the handlers at build time, so the bundle
+makes no function with `new Function` at run time. `beyond run --no-native
+build.ts` runs the build script (the plugin runs the app to capture its
+routes, importing Elysia's modules at run time; 3 s to compile the script,
+0.4 s to run it) and writes `dist/app.js`, as `bun build.ts` does: the same
+modules, 262 KB against Bun's 284 KB. `beyond build dist/app.js` compiles
+it; Elysia takes its Bun adapter (`Bun.serve` with `routes` and
 `reload`). Its responses are Bun's but for the order and case of some
 header names.
 ## Not yet
 
-Not yet: TLS for `Beyond.serve`, client certificates and
+Not yet: `Beyond.build`'s code splitting, source maps, `cjs` and `iife`
+formats, `minify.syntax` and `minify.identifiers`, CSS and HTML entry
+points, `compile` and `bytecode`; TLS for `Beyond.serve`, client certificates and
 `checkServerIdentity` for `fetch`, HTTP/2, WebSockets, `crypto.subtle`,
 TextDecoder's legacy encodings but windows-1252; errors print without
 Bun's source excerpt, and their stacks' lines are the bundle's.

@@ -40,8 +40,23 @@ fn main() {
     for f in ["bsd.c", "context.c", "loop.c", "socket.c", "udp.c", "eventing/epoll_kqueue.c"] {
         c.file(usockets.join(f));
     }
-    for f in ["native/bun_hooks.c", "native/stubs.c", "native/module.c", "native/server.c", "native/web.c", "native/client.c"] {
+    for f in [
+        "native/bun_hooks.c",
+        "native/stubs.c",
+        "native/module.c",
+        "native/server.c",
+        "native/web.c",
+        "native/client.c",
+        "native/system.c",
+    ] {
         c.file(f);
+    }
+    // Beyond.build's library (crates/beyond-build), built next to this one:
+    // target/<profile>/, above build/<this>/out.
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    if let Some(dir) = out.ancestors().nth(3) {
+        let lib = dir.join("libbeyond_build.so");
+        c.define("BEYOND_BUILD_LIB", Some(format!("{:?}", lib.display().to_string()).as_str()));
     }
     c.compile("beyond_c");
 

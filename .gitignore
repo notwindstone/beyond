@@ -3,3 +3,4 @@ node_modules
 bun.lock
 bun.lockb
 bench/elysia/dist
+!crates/beyond/tests/build/node_modules

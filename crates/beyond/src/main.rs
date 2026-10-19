@@ -56,6 +56,8 @@ const GLOBALS: &[(&str, &[&str])] = &[
     ("formdata", &["FormData"]),
     ("fetch", &["Headers", "Request", "Response"]),
     ("client", &["fetch"]),
+    ("process", &["process"]),
+    ("node/buffer", &["Buffer"]),
     (
         "streams",
         &[
@@ -76,6 +78,11 @@ const GLOBALS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// Node's modules Beyond has (lib/node/), which a program may also import
+/// without the `node:` prefix.
+const NODE_MODULES: &[&str] =
+    &["buffer", "events", "fs", "fs/promises", "module", "os", "path", "process", "url", "worker_threads"];
+
 /// What Beyond adds to a program.
 fn embed(opts: &mut BuildOpts) -> Result<()> {
     let lib = root().join("lib");
@@ -88,6 +95,14 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
     }
     let e: &mut EmbedOpts = &mut opts.embed;
     e.preludes.insert(0, lib.join("globals.ts"));
+    // Node's modules (`node:fs`, and `fs` too): lib/node/.
+    e.module_dirs.push(("node:".into(), lib.join("node")));
+    for name in NODE_MODULES {
+        e.aliases.push((name.to_string(), format!("node:{name}")));
+    }
+    // (Modules loaded at run time, Beyond.build's among them, import the
+    // program's instances of lib/'s.)
+    e.shared.push(lib.clone());
     e.module_dirs.push(("beyond:".into(), lib));
     e.c_modules.push(("beyond:native".into(), "js_init_module_beyond".into()));
     e.init_fn = Some("beyond_init".into());
@@ -136,7 +151,7 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
-    let fopts = luminous_front::Options { int_wrapping: true };
+    let fopts = luminous_front::Options::default();
     match Cli::parse().cmd {
         Cmd::Build { input, output, mut opts } => {
             embed(&mut opts)?;
