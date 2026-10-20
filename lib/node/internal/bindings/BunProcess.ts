@@ -1,6 +1,10 @@
-// Natives of Bun's BunProcess that Beyond does not have yet: each throws
-// when used.
+// Bun's BunProcess natives: reportUncaughtException (Bun__reportUnhandledError),
+// an error to process's 'uncaughtException' listeners, else reported as
+// uncaught (the program then exits with 1).
 
-import { $nativeStub } from "node:internal/intrinsics";
+import { reportError } from "beyond:native";
 
-export const jsFunctionReportUncaughtException: any = $nativeStub("BunProcess", "jsFunctionReportUncaughtException");
+export function jsFunctionReportUncaughtException(err: unknown): undefined {
+  reportError(err);
+  return undefined;
+}

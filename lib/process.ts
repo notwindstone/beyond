@@ -8,7 +8,11 @@ import {
   exit as nativeExit,
   hrtime as nativeHrtime,
   now,
+  processGroups,
+  processIds,
   processInfo,
+  processUmask,
+  setProcessHooks,
   writeOut,
 } from "beyond:native";
 import { EventEmitter } from "./node/events.ts";
@@ -104,13 +108,20 @@ class Process extends EventEmitter {
     nativeChdir(dir);
   }
 
+  /** Whether 'exit' was emitted (Node's `_exiting`). */
+  _exiting = false;
+
   exit(code?: number): never {
     if (code !== undefined) this.exitCode = code;
-    try {
-      this.emit("exit", this.exitCode ?? 0);
-    } finally {
-      nativeExit(this.exitCode ?? 0);
+    if (!this._exiting) {
+      this._exiting = true;
+      try {
+        this.emit("exit", this.exitCode ?? 0);
+      } finally {
+        nativeExit(this.exitCode ?? 0);
+      }
     }
+    nativeExit(this.exitCode ?? 0);
     throw new Error("unreachable");
   }
 
@@ -135,8 +146,66 @@ class Process extends EventEmitter {
     return { user: Math.round(now() * 1000), system: 0 };
   }
 
-  umask(): number {
-    return 0o22;
+  /** The file mode creation mask; with `mask`, set (Bun's checks: a
+   * 32-bit unsigned integer, or an octal string). */
+  umask(mask?: number | string): number {
+    if (mask === undefined) return processUmask(-1) as number;
+    let m: number;
+    if (typeof mask === "string") {
+      if (!/^[0-7]+$/.test(mask)) {
+        const e: any = new TypeError(`The argument 'mask' must be a 32-bit unsigned integer or an octal string. Received '${mask}'`);
+        e.code = "ERR_INVALID_ARG_VALUE";
+        throw e;
+      }
+      m = parseInt(mask, 8);
+    } else {
+      if (typeof mask !== "number") {
+        const e: any = new TypeError(`The "mask" argument must be of type number. Received ${typeof mask}`);
+        e.code = "ERR_INVALID_ARG_TYPE";
+        throw e;
+      }
+      if (!(mask % 1 === 0 && mask >= 0 && mask <= 4294967295)) {
+        const must = mask % 1 !== 0 ? "an integer" : ">= 0 && <= 4294967295";
+        const e: any = new RangeError(`The value of "mask" is out of range. It must be ${must}. Received ${mask}`);
+        e.code = "ERR_OUT_OF_RANGE";
+        throw e;
+      }
+      m = mask;
+    }
+    return processUmask(m) as number;
+  }
+
+  getuid(): number {
+    return (processIds() as number[])[0];
+  }
+
+  geteuid(): number {
+    return (processIds() as number[])[1];
+  }
+
+  getgid(): number {
+    return (processIds() as number[])[2];
+  }
+
+  getegid(): number {
+    return (processIds() as number[])[3];
+  }
+
+  getgroups(): number[] {
+    return processGroups() as number[];
+  }
+
+  // (Bun's are stubs: no handles or requests are listed.)
+  _getActiveHandles(): unknown[] {
+    return [];
+  }
+
+  _getActiveRequests(): unknown[] {
+    return [];
+  }
+
+  getActiveResourcesInfo(): string[] {
+    return [];
   }
 
   emitWarning(warning: string | Error, type?: string | { type?: string }): void {
@@ -161,6 +230,39 @@ class Process extends EventEmitter {
 }
 
 export const process = new Process();
+
+// The event loop's ends, as Bun's: 'beforeExit' when it has nothing left
+// to do (it goes on if a listener gives it work), then 'exit' with
+// process.exitCode, and that code (after an uncaught error: 'exit' with
+// process.exitCode, 1 if unset, and 1); an error nothing caught to the
+// listeners of 'unhandledRejection' (a rejection) or 'uncaughtException'
+// (an exception), when there are any.
+setProcessHooks(
+  (): boolean => {
+    if (process.listenerCount("beforeExit") === 0) return false;
+    process.emit("beforeExit", process.exitCode ?? 0);
+    return true;
+  },
+  (code: number): number => {
+    if (code >= 0 && process.exitCode === undefined) process.exitCode = code;
+    if (!process._exiting) {
+      process._exiting = true;
+      process.emit("exit", process.exitCode ?? 0);
+    }
+    return code >= 0 ? code : (process.exitCode ?? 0);
+  },
+  (err: unknown, origin: string, promise: unknown): boolean => {
+    if (origin === "unhandledRejection") {
+      if (process.listenerCount("unhandledRejection") === 0) return false;
+      process.emit("unhandledRejection", err, promise);
+      return true;
+    }
+    if (process.listenerCount("uncaughtException") === 0) return false;
+    process.emit("uncaughtException", err, origin);
+    return true;
+  },
+);
+
 // A child its parent gave an IPC channel (fork(), Bun.spawn's `ipc`):
 // process.send and the like.
 if (info.env.NODE_CHANNEL_FD !== undefined) import.meta.require("./spawn.ts").setupChildChannel(process);

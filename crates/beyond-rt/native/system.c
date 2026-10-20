@@ -460,6 +460,50 @@ static JSValue js_process_info(JSContext *c, JSValueConst this_val, int argc, JS
     return o;
 }
 
+// processIds(): [uid, euid, gid, egid].
+static JSValue js_process_ids(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValue a = JS_NewArray(c);
+    JS_SetPropertyUint32(c, a, 0, JS_NewUint32(c, getuid()));
+    JS_SetPropertyUint32(c, a, 1, JS_NewUint32(c, geteuid()));
+    JS_SetPropertyUint32(c, a, 2, JS_NewUint32(c, getgid()));
+    JS_SetPropertyUint32(c, a, 3, JS_NewUint32(c, getegid()));
+    return a;
+}
+
+// processGroups(): the supplementary group IDs, and the effective one
+// (Node's getgroups adds it when missing).
+static JSValue js_process_groups(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    int n = getgroups(0, NULL);
+    gid_t *g = n > 0 ? malloc(sizeof *g * (size_t)n) : NULL;
+    if (n > 0 && g)
+        n = getgroups(n, g);
+    JSValue a = JS_NewArray(c);
+    int k = 0, has_egid = 0;
+    gid_t egid = getegid();
+    for (int i = 0; g && i < n; i++) {
+        JS_SetPropertyUint32(c, a, k++, JS_NewUint32(c, g[i]));
+        has_egid |= g[i] == egid;
+    }
+    if (!has_egid && n > 0)
+        JS_SetPropertyUint32(c, a, k++, JS_NewUint32(c, egid));
+    free(g);
+    return a;
+}
+
+// processUmask(mask): sets the mask (a negative one: none), and gives the
+// one before.
+static JSValue js_process_umask(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    double m;
+    if (JS_ToFloat64(c, &m, argv[0]))
+        return JS_EXCEPTION;
+    if (m < 0) {
+        mode_t cur = umask(0);
+        umask(cur);
+        return JS_NewUint32(c, cur);
+    }
+    return JS_NewUint32(c, umask((mode_t)(uint32_t)m));
+}
+
 // hrtime(): nanoseconds of a monotonic clock, as a BigInt.
 static JSValue js_hrtime(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     struct timespec t;
@@ -855,6 +899,9 @@ const JSCFunctionListEntry beyond_system_functions[] = {
     JS_CFUNC_DEF("exit", 1, js_exit),
     JS_CFUNC_DEF("processInfo", 0, js_process_info),
     JS_CFUNC_DEF("hrtime", 0, js_hrtime),
+    JS_CFUNC_DEF("processIds", 0, js_process_ids),
+    JS_CFUNC_DEF("processGroups", 0, js_process_groups),
+    JS_CFUNC_DEF("processUmask", 1, js_process_umask),
     JS_CFUNC_DEF("buildTranspile", 1, js_build_transpile),
     JS_CFUNC_DEF("buildResolve", 1, js_build_resolve),
     JS_CFUNC_DEF("buildStart", 1, js_build_start),

@@ -36,6 +36,7 @@ unsafe extern "C" {
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
+    fn beyond_js_exception() -> c_int;
     fn beyond_flush_stdout();
     fn beyond_server_after_tick();
 }
@@ -127,16 +128,34 @@ pub extern "C" fn beyond_rt_now_ms() -> f64 {
     now_ns() as f64 / 1e6
 }
 
+/// Whether anything keeps the program alive: a referenced timer or a
+/// socket (what beyond_rt_loop waits for).
+#[unsafe(no_mangle)]
+pub extern "C" fn beyond_rt_alive() -> c_int {
+    // SAFETY: uWebSockets' loop of this thread.
+    let uloop = unsafe { uws_get_loop() };
+    let polls = unsafe { beyond_loop_num_polls(uloop) - beyond_client_idle_count() - beyond_spawn_unrefd() };
+    (polls > 0 || TIMERS.with_borrow(|t| t.refd())) as c_int
+}
+
 /// Runs the program's event loop until nothing keeps it alive (no timer
 /// that is referenced, no socket): 0, or nonzero when a callback threw (the
-/// exception is pending) or reportError reported an error.
+/// exception is pending, process's 'uncaughtException' listeners did not
+/// take it) or an error was reported.
 #[unsafe(no_mangle)]
 pub extern "C" fn beyond_rt_loop() -> c_int {
     // SAFETY: uWebSockets' loop of this thread, created on first use.
     let uloop = unsafe { uws_get_loop() };
     loop {
         // SAFETY: the context was set up by beyond_init.
-        if unsafe { beyond_js_run_jobs() } < 0 || unsafe { beyond_js_uncaught() } != 0 {
+        while unsafe { beyond_js_run_jobs() } < 0 {
+            // SAFETY: as above.
+            if unsafe { beyond_js_exception() } != 0 {
+                return 1;
+            }
+        }
+        // SAFETY: as above.
+        if unsafe { beyond_js_uncaught() } != 0 {
             return 1;
         }
         // The timers that are due, in order (a callback may set or clear
@@ -163,7 +182,11 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
             });
             let Some(id) = due else { break };
             // SAFETY: as above.
-            if unsafe { beyond_js_fire_timer(id) } < 0 || unsafe { beyond_js_uncaught() } != 0 {
+            if unsafe { beyond_js_fire_timer(id) } < 0 && unsafe { beyond_js_exception() } != 0 {
+                return 1;
+            }
+            // SAFETY: as above.
+            if unsafe { beyond_js_uncaught() } != 0 {
                 return 1;
             }
         }

@@ -20,6 +20,9 @@ int beyond_rt_loop(void);
 static JSContext *ctx;
 // JavaScript functions native code calls: held here, marked by mark().
 static JSValue on_timer;
+// process's hooks (setProcessHooks): 'beforeExit', 'exit', and an error
+// nothing caught, for 'uncaughtException' and 'unhandledRejection'.
+static JSValue on_before_exit = JS_UNDEFINED, on_exit_hook = JS_UNDEFINED, on_uncaught = JS_UNDEFINED;
 
 void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
 void beyond_client_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
@@ -55,6 +58,9 @@ static void mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
     beyond_system_mark(rt, mark_func);
     (void)opaque;
     JS_MarkValue(rt, on_timer, mark_func);
+    JS_MarkValue(rt, on_before_exit, mark_func);
+    JS_MarkValue(rt, on_exit_hook, mark_func);
+    JS_MarkValue(rt, on_uncaught, mark_func);
     for (int i = 0; i < nrejected; i++)
         JS_MarkValue(rt, rejected[i], mark_func);
     beyond_server_mark(rt, mark_func);
@@ -86,11 +92,16 @@ static void track_rejection(JSContext *c, JSValueConst promise, JSValueConst rea
 
 JSContext *beyond_js_context(void) { return ctx; }
 
-// An exception nothing caught (in a callback the loop made): printed, as
-// Bun prints an error a handler threw.
+// An exception nothing caught (in a callback the loop made): to process's
+// 'uncaughtException' listeners, else printed, as Bun prints an error a
+// handler threw.
 void beyond_flush_stdout(void);
 
+int beyond_js_exception(void);
 void beyond_js_report(void) {
+    // (Unless process's 'uncaughtException' listeners take it.)
+    if (beyond_js_exception() == 0)
+        return;
     beyond_flush_stdout();
     js_std_dump_error(ctx);
 }
@@ -99,29 +110,93 @@ void beyond_js_report(void) {
 // once the task it was reported in is over, as Bun's does.
 static int uncaught;
 
+// An error nothing caught (`origin` "uncaughtException", or
+// "unhandledRejection" with its promise) to process's listeners: 1 when
+// they took it; 0 when there are none; -1 when one threw (pending).
+static int to_listeners(JSValueConst err, const char *origin, JSValueConst promise) {
+    if (JS_IsUndefined(on_uncaught))
+        return 0;
+    JSValue args[3] = {JS_DupValue(ctx, err), JS_NewString(ctx, origin), JS_DupValue(ctx, promise)};
+    JSValue r = JS_Call(ctx, on_uncaught, JS_UNDEFINED, 3, args);
+    for (int i = 0; i < 3; i++)
+        JS_FreeValue(ctx, args[i]);
+    if (JS_IsException(r))
+        return -1;
+    int handled = JS_ToBool(ctx, r);
+    JS_FreeValue(ctx, r);
+    return handled;
+}
+
+// The pending exception a callback of the loop threw: 0 when process's
+// 'uncaughtException' listeners took it (the loop goes on), else 1 (it
+// stays pending, or the one a listener threw is).
+int beyond_js_exception(void) {
+    if (!JS_HasException(ctx))
+        return 1;
+    JSValue e = JS_GetException(ctx);
+    int h = to_listeners(e, "uncaughtException", JS_UNDEFINED);
+    if (h == 0)
+        JS_Throw(ctx, e);
+    else
+        JS_FreeValue(ctx, e);
+    return h == 1 ? 0 : 1;
+}
+
 // Whether the program is to exit with 1: reportError reported an error,
-// or a promise was rejected with no handler (reported here, as Bun reports
-// an unhandled rejection: as an uncaught exception).
+// or a promise was rejected with no handler (given to process's listeners,
+// else reported, as Bun reports an unhandled rejection: as an uncaught
+// exception).
 int beyond_js_uncaught(void) {
     if (nrejected > 0) {
         beyond_flush_stdout();
-        for (int i = 0; i < nrejected; i += 2) {
-            JS_FreeValue(ctx, rejected[i]);
-            JS_Throw(ctx, rejected[i + 1]);
-            js_std_dump_error(ctx);
+        // (Listeners may reject more promises: take the list first.)
+        JSValue *list = rejected;
+        int n = nrejected;
+        rejected = NULL;
+        nrejected = cap_rejected = 0;
+        for (int i = 0; i < n; i += 2) {
+            int h = uncaught ? 0 : to_listeners(list[i + 1], "unhandledRejection", list[i]);
+            if (h != 1) {
+                if (h == 0)
+                    JS_Throw(ctx, JS_DupValue(ctx, list[i + 1]));
+                js_std_dump_error(ctx);
+                uncaught = 1;
+            }
+            JS_FreeValue(ctx, list[i]);
+            JS_FreeValue(ctx, list[i + 1]);
         }
-        nrejected = 0;
-        uncaught = 1;
+        free(list);
     }
     return uncaught;
 }
 
-// reportError(error): printed as an uncaught exception.
+// reportError(error): to process's 'uncaughtException' listeners, else
+// printed as an uncaught exception.
 static JSValue js_report_error(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JSValueConst err = argc > 0 ? argv[0] : JS_UNDEFINED;
+    int h = uncaught ? 0 : to_listeners(err, "uncaughtException", JS_UNDEFINED);
+    if (h == 1)
+        return JS_UNDEFINED;
     beyond_flush_stdout();
-    JS_Throw(c, JS_DupValue(c, argc > 0 ? argv[0] : JS_UNDEFINED));
+    if (h == 0)
+        JS_Throw(c, JS_DupValue(c, err));
     js_std_dump_error(c);
     uncaught = 1;
+    return JS_UNDEFINED;
+}
+
+// setProcessHooks(beforeExit, exit, uncaught): beforeExit() emits the event,
+// telling whether it had listeners; exit(code) emits 'exit' (code -1:
+// process.exitCode's) and gives the code to exit with; uncaught(error,
+// origin, promise) gives an error to the listeners of 'uncaughtException'
+// or 'unhandledRejection', telling whether there were any.
+static JSValue js_set_process_hooks(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JS_FreeValue(c, on_before_exit);
+    JS_FreeValue(c, on_exit_hook);
+    JS_FreeValue(c, on_uncaught);
+    on_before_exit = JS_DupValue(c, argv[0]);
+    on_exit_hook = JS_DupValue(c, argv[1]);
+    on_uncaught = JS_DupValue(c, argv[2]);
     return JS_UNDEFINED;
 }
 
@@ -217,6 +292,7 @@ static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("promiseNew", 0, js_promise_new),
     JS_CFUNC_DEF("promiseSettle", 3, js_promise_settle),
     JS_CFUNC_DEF("getEnv", 1, js_get_env),
+    JS_CFUNC_DEF("setProcessHooks", 3, js_set_process_hooks),
 };
 
 static int module_init(JSContext *c, JSModuleDef *m) {
@@ -269,9 +345,56 @@ int beyond_init(JSContext *c, int argc, char **argv) {
     return JS_AddGCMarkHook(JS_GetRuntime(c), mark, NULL) < 0;
 }
 
+int beyond_rt_alive(void);
+
 int beyond_loop(JSContext *c) {
     (void)c;
-    int r = beyond_rt_loop();
+    int r;
+    for (;;) {
+        r = beyond_rt_loop();
+        if (r || JS_IsUndefined(on_before_exit))
+            break;
+        // ('beforeExit': the loop goes on while its listeners give it work.)
+        JSValue v = JS_Call(ctx, on_before_exit, JS_UNDEFINED, 0, NULL);
+        if (JS_IsException(v)) {
+            if (beyond_js_exception())
+                break;
+            continue;
+        }
+        int had = JS_ToBool(ctx, v);
+        JS_FreeValue(ctx, v);
+        if (!had)
+            break;
+        if (beyond_js_run_jobs() < 0 && beyond_js_exception()) {
+            r = 1;
+            break;
+        }
+        if (beyond_js_uncaught()) {
+            r = 1;
+            break;
+        }
+        if (!beyond_rt_alive())
+            break;
+    }
+    // (The error ending the program, printed before 'exit', as Node's.)
+    if (r && JS_HasException(ctx)) {
+        beyond_flush_stdout();
+        js_std_dump_error(ctx);
+    }
+    if (!JS_IsUndefined(on_exit_hook)) {
+        JSValue code = JS_NewInt32(ctx, r ? r : -1);
+        JSValue v = JS_Call(ctx, on_exit_hook, JS_UNDEFINED, 1, &code);
+        if (JS_IsException(v)) {
+            beyond_flush_stdout();
+            js_std_dump_error(ctx);
+            r = 7;
+        } else {
+            int32_t x = r;
+            if (JS_ToInt32(ctx, &x, v) == 0)
+                r = x;
+            JS_FreeValue(ctx, v);
+        }
+    }
     // (Before an exception the program's exit prints, and the exit.)
     beyond_flush_stdout();
     return r;
