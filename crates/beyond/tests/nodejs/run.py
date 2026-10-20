@@ -36,11 +36,26 @@ def thread_id():
     return _ids.n
 
 
+# The flags of a test's `// Flags:` line that Bun's runner passes on the
+# command line (scripts/runner.node.ts, resolutionGatingFlags): Node's
+# common module handles the others, in the test's process or a child.
+GATING_FLAGS = {"--expose-internals", "--experimental-quic", "--experimental-stream-iter", "--no-warnings"}
+
+
+def test_flags(test):
+    try:
+        with open(test, encoding="utf-8", errors="replace") as f:
+            m = re.search(r"^// Flags:[^\S\r\n]+(--[^\r\n]*)$", f.read(), re.M)
+    except OSError:
+        return []
+    return [f for f in m.group(1).split() if f.split("=")[0] in GATING_FLAGS] if m else []
+
+
 def run_one(runner, test, cwd, timeout):
     start = time.time()
     try:
         p = subprocess.run(
-            [runner, test],
+            [runner, *test_flags(test), test],
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

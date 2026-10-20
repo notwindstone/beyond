@@ -1481,8 +1481,14 @@ static JSValue js_fetch_pause(JSContext *ctx, JSValueConst this_val, int argc, J
     return JS_TRUE;
 }
 
+// opensslVersion(): the version of the OpenSSL linked in (process.versions.openssl).
+static JSValue js_openssl_version(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return JS_NewString(c, OpenSSL_version(OPENSSL_VERSION_STRING));
+}
+
 const JSCFunctionListEntry beyond_client_functions[] = {
     JS_CFUNC_DEF("fetchInit", 1, js_fetch_init),
+    JS_CFUNC_DEF("opensslVersion", 0, js_openssl_version),
     JS_CFUNC_DEF("fetchRequest", 7, js_fetch_request),
     JS_CFUNC_DEF("fetchWrite", 2, js_fetch_write),
     JS_CFUNC_DEF("fetchEnd", 1, js_fetch_end),

@@ -15,7 +15,7 @@ import { isBuiltin, resolveFile } from "./resolve.ts";
 export const LIB: string = import.meta.dirname;
 
 /** Bun's modules Beyond has, by their files in lib/. */
-const BUN_MODULES: Record<string, string> = { "bun:test": "jest.ts" };
+const BUN_MODULES: Record<string, string> = { "bun:test": "jest.ts", "bun:internal-for-testing": "internal_for_testing.ts" };
 
 function registry(): Map<string, () => object> | undefined {
   return (globalThis as any)[Symbol.for("luminous.modules")];
@@ -26,6 +26,8 @@ function registry(): Map<string, () => object> | undefined {
 function resolveName(spec: string, base: string): string {
   if (spec.startsWith("beyond:") || spec.startsWith("qjs:") || spec.startsWith("luminous:")) return spec;
   if (spec.startsWith("file:")) spec = fileURLToPath(spec);
+  // (Bun's internal modules, which lib/node's import by these names.)
+  if (spec.startsWith("node:internal/")) return spec;
   if (isBuiltin(spec)) {
     if (spec.startsWith("bun:") || spec === "bun") return spec;
     return "node:" + (spec.startsWith("node:") ? spec.slice(5) : spec);
@@ -82,6 +84,16 @@ function builtinFile(name: string): string | undefined {
 function load(name: string): { code?: string; exports?: object; meta?: object } {
   const shared = registry()?.get(name);
   if (shared !== undefined) return { exports: shared() };
+  // (Beyond's modules, of lib/: the program's own, or loaded from there.)
+  if (name.startsWith("beyond:") && name !== "beyond:native") {
+    const rest = name.slice(7);
+    let file = `${LIB}/${rest}`;
+    if (!/\.[cm]?[jt]s$/.test(rest)) file = stat(`${file}.ts`, true, false) !== undefined ? `${file}.ts` : `${file}.js`;
+    const own = registry()?.get(file);
+    if (own !== undefined) return { exports: own() };
+    const f = JSON.stringify(file);
+    return { code: `export * from ${f}; export { default } from ${f};\n` };
+  }
   if (name.startsWith("node:")) {
     const file = builtinFile(name.slice(5));
     if (file === undefined) {
@@ -151,6 +163,13 @@ export function libModuleSync(file: string): any {
 export function builtinModule(name: string): unknown {
   if (name in BUN_MODULES) {
     const ns: any = importModuleSync(`${LIB}/${BUN_MODULES[name]}`);
+    return ns?.default ?? ns;
+  }
+  // (Node's internal modules, with --expose-internals: Bun's own.)
+  if (name.startsWith("internal/")) {
+    const file = builtinFile(name);
+    if (file === undefined) return undefined;
+    const ns: any = importModuleSync(file);
     return ns?.default ?? ns;
   }
   if (!isBuiltin(name) || name.startsWith("bun:")) return undefined;

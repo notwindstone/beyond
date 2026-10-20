@@ -84,18 +84,47 @@ export function builtins(): unknown[] {
     import.meta.require("node:zlib"),
     import.meta.require("node:zlib/iter"),
     import.meta.require("bun:test"),
+    import.meta.require("bun:internal-for-testing"),
   ];
 }
 
-const arg = process.argv[2];
-if (arg === undefined) {
-  console.error("usage: runner <test.js> [args...]");
-  process.exit(2);
+// `runner [flags...] <test.js> [args...]`, or `runner [flags...] -e|-p
+// <code> [args...]` (Node's: tests run process.execPath so). The flags go
+// to process.execArgv, as Node's command line puts them there.
+const args = process.argv.slice(2);
+const execArgv: string[] = [];
+let code: string | undefined;
+let print = false;
+while (args.length > 0 && args[0].startsWith("-")) {
+  const flag = args.shift()!;
+  if (flag === "-e" || flag === "--eval" || flag === "-p" || flag === "--print") {
+    code = args.shift() ?? "";
+    print = flag === "-p" || flag === "--print";
+    execArgv.push(flag, code);
+    break;
+  }
+  execArgv.push(flag);
 }
-const file = resolve(arg);
-// As `node <test.js>` has them: the test's path second.
-process.argv.splice(1, 2, file);
-if (file.endsWith(".mjs")) await import(pathToFileURL(file).href);
-else createRequire(file)(file);
+process.execArgv = execArgv;
+if (code !== undefined) {
+  // (As Node's [eval]: CommonJS, in the working directory.)
+  const filename = resolve("[eval]");
+  process.argv.splice(1, process.argv.length - 1, ...args);
+  const module = { exports: {}, filename, id: "[eval]", loaded: false };
+  const fn = new Function("exports", "require", "module", "__filename", "__dirname", `return eval(${JSON.stringify(code)})`);
+  const value = fn(module.exports, createRequire(filename), module, filename, process.cwd());
+  if (print) console.log(value);
+} else {
+  const arg = args.shift();
+  if (arg === undefined) {
+    console.error("usage: runner [flags...] <test.js> [args...]");
+    process.exit(2);
+  }
+  const file = resolve(arg);
+  // As `node <test.js>` has them: the test's path second.
+  process.argv.splice(1, process.argv.length - 1, file, ...args);
+  if (file.endsWith(".mjs")) await import(pathToFileURL(file).href);
+  else createRequire(file)(file);
+}
 // (The tests the file registered with bun:test or node:test.)
 (globalThis as any)[Symbol.for("beyond.test.run")]?.();

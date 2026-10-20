@@ -8,6 +8,7 @@ import {
   exit as nativeExit,
   hrtime as nativeHrtime,
   now,
+  opensslVersion,
   processGroups,
   processIds,
   processInfo,
@@ -89,7 +90,7 @@ class Process extends EventEmitter {
   platform = "linux";
   arch = arch;
   version = "v24.3.0";
-  versions: Record<string, string> = { node: "24.3.0", bun: "1.4.3", beyond: "0.1.0" };
+  versions: Record<string, string> = { node: "24.3.0", bun: "1.4.3", beyond: "0.1.0", openssl: opensslVersion() as string };
   release = { name: "node" };
   config = { variables: {} };
   features = { inspector: false, typescript: "strip" };

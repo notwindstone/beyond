@@ -1452,12 +1452,14 @@ function renameSync(oldPath: any, newPath?: any): undefined {
   return undefined;
 }
 
-/** RmDir::from_js_impl's options: [recursive, force] (`strict`: rm's, where
- * an own `undefined` is a value). */
-function rmOptions(options: any, strict: boolean): [boolean, boolean] {
+/** RmDir::from_js_impl's options: [recursive, force, maxRetries,
+ * retryDelay] (`strict`: rm's, where an own `undefined` is a value). */
+function rmOptions(options: any, strict: boolean): [boolean, boolean, number, number] {
   let recursive = false,
-    force = false;
-  if (options === undefined) return [recursive, force];
+    force = false,
+    maxRetries = 0,
+    retryDelay = 100;
+  if (options === undefined) return [recursive, force, maxRetries, retryDelay];
   if (!isObject(options)) throw invalidArgs('The "options" argument must be of type object.');
   const has = (name: string) => (strict ? Object.prototype.hasOwnProperty.call(options, name) : options[name] !== undefined);
   if (has("recursive")) {
@@ -1470,9 +1472,22 @@ function rmOptions(options: any, strict: boolean): [boolean, boolean] {
     if (typeof v !== "boolean") throw invalidArgs('The "options.force" property must be of type boolean.');
     force = v;
   }
-  if (has("retryDelay")) validateInteger(options.retryDelay, "options.retryDelay", 0, 4294967295);
-  if (has("maxRetries")) validateInteger(options.maxRetries, "options.maxRetries", 0, 4294967295);
-  return [recursive, force];
+  if (has("retryDelay")) retryDelay = validateInteger(options.retryDelay, "options.retryDelay", 0, 4294967295);
+  if (has("maxRetries")) maxRetries = validateInteger(options.maxRetries, "options.maxRetries", 0, 4294967295);
+  return [recursive, force, maxRetries, retryDelay];
+}
+
+/** bun:internal-for-testing's internal/fs/utils.stringToFlags: the flags
+ * fs.open parses. */
+export function stringToFlagsForTesting(flags?: any): number {
+  return flagsArg(flags, O_RDONLY);
+}
+
+/** internal/fs/utils.validateRmOptionsSync: the options fs.rm parses. */
+export function rmOptionsForTesting(path?: any, options?: any): any {
+  requiredPath(path, "path");
+  const o = rmOptions(options, true);
+  return { retryDelay: o[3], maxRetries: o[2], recursive: o[0], force: o[1] };
 }
 
 function rmSync(path: any, options?: any): undefined {
