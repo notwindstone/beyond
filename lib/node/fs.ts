@@ -1519,13 +1519,25 @@ setName(opendir, "opendir");
 
 export { appendFile, appendFileSync, access, accessSync, chown, chownSync, chmod, chmodSync, close, closeSync, copyFile, copyFileSync, cp, cpSync, createReadStream, createWriteStream, exists, existsSync, fchown, fchownSync, fchmod, fchmodSync, fdatasync, fdatasyncSync, fstat, fstatSync, fsync, fsyncSync, ftruncate, ftruncateSync, futimes, futimesSync, glob, globSync, lchown, lchownSync, lchmod, lchmodSync, link, linkSync, lstat, lstatSync, lutimes, lutimesSync, mkdir, mkdirSync, mkdtemp, mkdtempSync, mkdtempDisposableSync, open, openSync, read, readFile, readFileSync, readSync, readdir, readdirSync, readlink, readlinkSync, readv, readvSync, realpath, realpathSync, rename, renameSync, rm, rmSync, rmdir, rmdirSync, stat, statfs, statSync, statfsSync, symlink, symlinkSync, truncate, truncateSync, unlink, unlinkSync, unwatchFile, utimes, utimesSync, watch, watchFile, write, writeFile, writeFileSync, writeSync, writev, writevSync, _toUnixTimestamp, openAsBlob, Dirent, opendir, opendirSync, constants, Dir, Stats };
 const __export_F_OK = exports.F_OK;
-const __export_FileReadStream = exports.FileReadStream;
-const __export_FileWriteStream = exports.FileWriteStream;
 const __export_R_OK = exports.R_OK;
-const __export_ReadStream = exports.ReadStream;
-const __export_Utf8Stream = exports.Utf8Stream;
 const __export_W_OK = exports.W_OK;
-const __export_WriteStream = exports.WriteStream;
+// (Beyond: the stream classes are read now, unless node:internal/fs/streams,
+// which imports this module, is what is being evaluated: it calls
+// __streamsReady once it is.)
+let __export_FileReadStream, __export_FileWriteStream, __export_ReadStream, __export_Utf8Stream, __export_WriteStream;
+function readStreamExports() {
+  __export_ReadStream = exports.ReadStream;
+  __export_WriteStream = exports.WriteStream;
+  __export_FileReadStream = exports.FileReadStream;
+  __export_FileWriteStream = exports.FileWriteStream;
+  __export_Utf8Stream = exports.Utf8Stream;
+}
+try {
+  readStreamExports();
+} catch {}
+export function __streamsReady() {
+  readStreamExports();
+}
 const __export_X_OK = exports.X_OK;
 const __export_promises = exports.promises;
 export { __export_F_OK as F_OK, __export_FileReadStream as FileReadStream, __export_FileWriteStream as FileWriteStream, __export_R_OK as R_OK, __export_ReadStream as ReadStream, __export_Utf8Stream as Utf8Stream, __export_W_OK as W_OK, __export_WriteStream as WriteStream, __export_X_OK as X_OK, __export_promises as promises };

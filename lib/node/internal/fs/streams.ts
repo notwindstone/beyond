@@ -8,7 +8,7 @@ import { fileURLToPath as __fileURLToPath } from "beyond:sys/url";
 import { $ERR_INVALID_ARG_TYPE, $ERR_INVALID_ARG_VALUE, $ERR_METHOD_NOT_IMPLEMENTED, $ERR_OUT_OF_RANGE, $ERR_STREAM_DESTROYED, $isPromise, $min, $toClass } from "node:internal/intrinsics";
 import type { FileSink } from "bun";
 const { Readable, Writable, finished } = __stream;
-import fs from "node:fs";
+import fs, { __streamsReady } from "node:fs";
 const { read, write, fsync, writev } = fs;
 const { FileHandle, kRef, kUnref, kFd } = (fs.promises as any).$data as {
   FileHandle: { new (): FileHandle };
@@ -853,3 +853,6 @@ export default {
 };
 
 export { ReadStream, WriteStream, kWriteStreamFastPath, writableFromFileSink };
+
+// (Beyond: node:fs's named exports of these, when this module was evaluated first.)
+__streamsReady();

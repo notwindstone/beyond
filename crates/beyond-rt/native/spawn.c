@@ -642,10 +642,10 @@ static int prep(JSContext *c, Prep *p, int argc, JSValueConst *argv, bool sync) 
             goto out_props;
         }
         offs[nargs + nenv++] = len;
+        // (`KEY=value`: the key's NUL made the `=`, the value after it.)
         bool ok = append(&buf, &len, &cap, k, kn);
         if (ok) {
             buf[len - 1] = '=';
-            len--;
             ok = append(&buf, &len, &cap, s, vn);
         }
         JS_FreeCString(c, k);
