@@ -157,14 +157,16 @@ void beyond_spawn_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
     JS_MarkValue(rt, buffer_proto, mark_func);
 }
 
-static double handle_of(uint32_t i) { return (double)i + (double)(watches[i]->gen & 0x1FFFFFFF) * 16777216.0; }
+// A watch's handle: its index + 1 (JavaScript takes 0 for none) and its
+// generation.
+static double handle_of(uint32_t i) { return (double)(i + 1) + (double)(watches[i]->gen & 0x1FFFFFFF) * 16777216.0; }
 
 static Watch *watch_of(JSContext *c, JSValueConst v, uint32_t *index) {
     double h;
     if (JS_ToFloat64(c, &h, v) || !(h >= 0))
         return NULL;
     uint64_t u = (uint64_t)h;
-    uint32_t i = (uint32_t)(u & 0xFFFFFF), gen = (uint32_t)(u >> 24);
+    uint32_t i = (uint32_t)(u & 0xFFFFFF) - 1, gen = (uint32_t)(u >> 24);
     if (i >= nwatches || !watches[i]->live || (watches[i]->gen & 0x1FFFFFFF) != gen)
         return NULL;
     if (index)
