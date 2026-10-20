@@ -7,18 +7,22 @@ import { buildResolve } from "beyond:native";
 
 /** Node's built-in modules (as `node:` specifiers drop the prefix). */
 export const builtinModules = [
-  "assert", "assert/strict", "async_hooks", "buffer", "child_process", "cluster", "console", "constants", "crypto",
-  "dgram", "diagnostics_channel", "dns", "dns/promises", "domain", "events", "fs", "fs/promises", "http", "http2",
-  "https", "inspector", "module", "net", "os", "path", "path/posix", "path/win32", "perf_hooks", "process", "punycode",
-  "querystring", "readline", "readline/promises", "repl", "stream", "stream/consumers", "stream/promises", "stream/web",
-  "string_decoder", "sys", "timers", "timers/promises", "tls", "trace_events", "tty", "url", "util", "util/types", "v8",
-  "vm", "wasi", "worker_threads", "zlib",
+  "_http_agent", "_http_client", "_http_common", "_http_incoming", "_http_outgoing", "_http_server", "_stream_duplex",
+  "_stream_passthrough", "_stream_readable", "_stream_transform", "_stream_wrap", "_stream_writable", "_tls_common",
+  "_tls_wrap", "assert", "assert/strict", "async_hooks", "buffer", "child_process", "cluster", "console", "constants",
+  "crypto", "dgram", "diagnostics_channel", "dns", "dns/promises", "domain", "events", "fs", "fs/promises", "http",
+  "http2", "https", "inspector", "inspector/promises", "module", "net", "os", "path", "path/posix", "path/win32",
+  "perf_hooks", "process", "punycode", "querystring", "readline", "readline/promises", "repl", "stream",
+  "stream/consumers", "stream/iter", "stream/promises", "stream/web", "string_decoder", "sys", "timers", "timers/promises", "tls",
+  "trace_events", "tty", "url", "util", "util/types", "v8", "vm", "wasi", "worker_threads", "zlib", "zlib/iter",
 ];
+/** (Those only the `node:` prefix names, as Node's newest ones.) */
+const prefixOnly = new Set(["test", "sqlite", "quic"]);
 const builtins = new Set(builtinModules);
 
 /** Whether `spec` names a built-in module (`fs`, `node:fs`; `bun:*`). */
 export function isBuiltin(spec: string): boolean {
-  if (spec.startsWith("node:")) return builtins.has(spec.slice(5)) || spec === "node:test" || spec === "node:sqlite";
+  if (spec.startsWith("node:")) return builtins.has(spec.slice(5)) || prefixOnly.has(spec.slice(5));
   return builtins.has(spec) || spec.startsWith("bun:") || spec === "bun";
 }
 

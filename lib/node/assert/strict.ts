@@ -1,0 +1,27 @@
+// Hardcoded module "node:assert/strict"
+import __assert from "node:assert";
+const __default = __assert.strict;
+export default __default;
+const __export_Assert = __default.Assert;
+const __export_AssertionError = __default.AssertionError;
+const __export_CallTracker = __default.CallTracker;
+const __export_deepEqual = __default.deepEqual;
+const __export_deepStrictEqual = __default.deepStrictEqual;
+const __export_doesNotMatch = __default.doesNotMatch;
+const __export_doesNotReject = __default.doesNotReject;
+const __export_doesNotThrow = __default.doesNotThrow;
+const __export_equal = __default.equal;
+const __export_fail = __default.fail;
+const __export_ifError = __default.ifError;
+const __export_match = __default.match;
+const __export_notDeepEqual = __default.notDeepEqual;
+const __export_notDeepStrictEqual = __default.notDeepStrictEqual;
+const __export_notEqual = __default.notEqual;
+const __export_notStrictEqual = __default.notStrictEqual;
+const __export_ok = __default.ok;
+const __export_partialDeepStrictEqual = __default.partialDeepStrictEqual;
+const __export_rejects = __default.rejects;
+const __export_strict = __default.strict;
+const __export_strictEqual = __default.strictEqual;
+const __export_throws = __default.throws;
+export { __export_Assert as Assert, __export_AssertionError as AssertionError, __export_CallTracker as CallTracker, __export_deepEqual as deepEqual, __export_deepStrictEqual as deepStrictEqual, __export_doesNotMatch as doesNotMatch, __export_doesNotReject as doesNotReject, __export_doesNotThrow as doesNotThrow, __export_equal as equal, __export_fail as fail, __export_ifError as ifError, __export_match as match, __export_notDeepEqual as notDeepEqual, __export_notDeepStrictEqual as notDeepStrictEqual, __export_notEqual as notEqual, __export_notStrictEqual as notStrictEqual, __export_ok as ok, __export_partialDeepStrictEqual as partialDeepStrictEqual, __export_rejects as rejects, __export_strict as strict, __export_strictEqual as strictEqual, __export_throws as throws };

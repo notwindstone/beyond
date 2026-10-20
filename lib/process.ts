@@ -149,10 +149,19 @@ class Process extends EventEmitter {
     return (globalThis as any)[Symbol.for("beyond.builtin")]?.(name);
   }
 
-  binding(): never {
-    throw new Error("process.binding is not supported");
+  /** Sends a signal (SIGTERM by default) to process `pid`. */
+  kill(pid: number, signal?: string | number): true {
+    return import.meta.require("./spawn.ts").killProcess(pid, signal);
+  }
+
+  /** Node's internal modules, the few Bun has (node:internal/bindings/process_binding). */
+  binding(name: string): unknown {
+    return import.meta.require("node:internal/bindings/process_binding").binding(name);
   }
 }
 
 export const process = new Process();
+// A child its parent gave an IPC channel (fork(), Bun.spawn's `ipc`):
+// process.send and the like.
+if (info.env.NODE_CHANNEL_FD !== undefined) import.meta.require("./spawn.ts").setupChildChannel(process);
 export default process;

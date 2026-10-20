@@ -23,6 +23,9 @@ static JSValue on_timer;
 
 void beyond_server_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
 void beyond_client_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+void beyond_spawn_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+extern const JSCFunctionListEntry beyond_spawn_functions[];
+extern const int beyond_spawn_function_count;
 extern const JSCFunctionListEntry beyond_client_functions[];
 extern const int beyond_client_function_count;
 extern const JSCFunctionListEntry beyond_server_functions[];
@@ -31,6 +34,12 @@ extern const JSCFunctionListEntry beyond_web_functions[];
 extern const int beyond_web_function_count;
 extern const JSCFunctionListEntry beyond_system_functions[];
 extern const int beyond_system_function_count;
+extern const JSCFunctionListEntry beyond_node_functions[];
+extern const int beyond_node_function_count;
+extern const JSCFunctionListEntry beyond_fs_functions[];
+extern const int beyond_fs_function_count;
+extern const JSCFunctionListEntry beyond_buffer_functions[];
+extern const int beyond_buffer_function_count;
 void beyond_system_init(int argc, char **argv);
 void beyond_system_install_loader(JSContext *c);
 void beyond_system_mark(JSRuntime *rt, JS_MarkFunc *mark);
@@ -48,6 +57,7 @@ static void mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
         JS_MarkValue(rt, rejected[i], mark_func);
     beyond_server_mark(rt, mark_func);
     beyond_client_mark(rt, mark_func);
+    beyond_spawn_mark(rt, mark_func);
 }
 
 static void track_rejection(JSContext *c, JSValueConst promise, JSValueConst reason, bool is_handled, void *opaque) {
@@ -212,9 +222,17 @@ static int module_init(JSContext *c, JSModuleDef *m) {
         return -1;
     if (JS_SetModuleExportList(c, m, beyond_web_functions, beyond_web_function_count))
         return -1;
+    if (JS_SetModuleExportList(c, m, beyond_node_functions, beyond_node_function_count))
+        return -1;
+    if (JS_SetModuleExportList(c, m, beyond_fs_functions, beyond_fs_function_count))
+        return -1;
+    if (JS_SetModuleExportList(c, m, beyond_buffer_functions, beyond_buffer_function_count))
+        return -1;
     if (JS_SetModuleExportList(c, m, beyond_system_functions, beyond_system_function_count))
         return -1;
     if (JS_SetModuleExportList(c, m, beyond_client_functions, beyond_client_function_count))
+        return -1;
+    if (JS_SetModuleExportList(c, m, beyond_spawn_functions, beyond_spawn_function_count))
         return -1;
     return JS_SetModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
 }
@@ -224,8 +242,12 @@ JSModuleDef *js_init_module_beyond(JSContext *c, const char *name) {
     if (m) {
         JS_AddModuleExportList(c, m, functions, sizeof functions / sizeof *functions);
         JS_AddModuleExportList(c, m, beyond_web_functions, beyond_web_function_count);
+        JS_AddModuleExportList(c, m, beyond_node_functions, beyond_node_function_count);
+        JS_AddModuleExportList(c, m, beyond_fs_functions, beyond_fs_function_count);
+        JS_AddModuleExportList(c, m, beyond_buffer_functions, beyond_buffer_function_count);
         JS_AddModuleExportList(c, m, beyond_system_functions, beyond_system_function_count);
         JS_AddModuleExportList(c, m, beyond_client_functions, beyond_client_function_count);
+        JS_AddModuleExportList(c, m, beyond_spawn_functions, beyond_spawn_function_count);
         JS_AddModuleExportList(c, m, beyond_server_functions, beyond_server_function_count);
     }
     return m;

@@ -136,6 +136,31 @@
   made JavaScript by the build library, CommonJS required) and
   interpreted; a module of the program that it imports is the program's
   own instance.
+## Node's API, from Bun (in progress)
+
+`lib/node` holds Bun's own Node modules (`src/js/node`, `src/js/internal`
+and `src/js/thirdparty` of Bun's Rust rewrite), made ES modules by
+`crates/bun-import` (`cargo run -p bun-import -- BUN_DIR lib/node
+[MODULE...]`; it overwrites what it converts, hand edits too (marked
+"(Beyond: ...)"; `buffer.ts` and `string_decoder.ts` are rewritten
+ports), so name the modules to convert again): Bun's
+`$`-intrinsics come from `node:internal/intrinsics`, its natives from
+`node:internal/bindings/*` (in TypeScript) or `beyond:native` (in C:
+`native/buffer.c`, `fs.c`, `spawn.c`, `node.c`); a native not ported yet
+throws `ERR_NOT_IMPLEMENTED` when called. Ported natively so far:
+`node:buffer` (Node's `lib/buffer.js` on JSBuffer's natives),
+`string_decoder`, `node:fs` (every call, Bun's errors, `fs.watch` on
+inotify; async calls run synchronously and settle later),
+`Bun.spawn`/`spawnSync` (so `node:child_process`), `performance` and
+`PerformanceObserver`, `setImmediate`, `MessageChannel`/`BroadcastChannel`
+(in one thread), `util.isDeepStrictEqual`, `process.binding`.
+
+`crates/beyond/tests/nodejs` runs Node's tests as Bun keeps them
+(`test/js/node/test/parallel`): build `runner.ts` with `beyond build
+--no-native`, then `run.py RUNNER [FILTER...]`. Of 3661: about 700 pass
+(child_process 56 of 102, buffer 48 of 63, fs 195 of 336); most failures
+are modules whose natives are not ported (http, net, dns, tls, zlib, vm,
+crypto, worker threads).
 ## Tests
 
 The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT

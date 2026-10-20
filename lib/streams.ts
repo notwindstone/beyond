@@ -273,6 +273,8 @@ export class ReadableStream<R = any> {
   _reader: ReadableStreamDefaultReader<R> | ReadableStreamBYOBReader | undefined = undefined;
   _storedError: any = undefined;
   _disturbed = false;
+  /** What Node's streams wait on to see it close (webStreamClosedPromise). */
+  _closedWatch: Deferred<void> | undefined = undefined;
   _controller!: ReadableStreamDefaultController<R> | ReadableByteStreamController;
   // A stream of a body's or a Blob's bytes (Bun's are of a Blob): that
   // Blob's type, and the content type a response sends it with if it has
@@ -667,6 +669,7 @@ function fulfillReadRequest(stream: ReadableStream<any>, chunk: any, done: boole
 
 function readableStreamClose(stream: ReadableStream<any>): void {
   stream._state = "closed";
+  stream._closedWatch?.resolve(undefined);
   const reader = stream._reader;
   if (reader === undefined) return;
   reader._closed.resolve(undefined);
@@ -680,6 +683,7 @@ function readableStreamClose(stream: ReadableStream<any>): void {
 function readableStreamError(stream: ReadableStream<any>, e: any): void {
   stream._state = "errored";
   stream._storedError = e;
+  stream._closedWatch?.reject(e);
   const reader = stream._reader;
   if (reader === undefined) return;
   reader._closed.reject(e);
@@ -1902,6 +1906,8 @@ const CLOSE_SENTINEL = Symbol("close");
 export class WritableStream<W = any> {
   _state: "writable" | "closed" | "erroring" | "errored" = "writable";
   _storedError: any = undefined;
+  /** What Node's streams wait on to see it close (webStreamClosedPromise). */
+  _closedWatch: Deferred<void> | undefined = undefined;
   _writer: WritableStreamDefaultWriter<W> | undefined = undefined;
   _controller!: WritableStreamDefaultController;
   _writeRequests: Deferred<void>[] = [];
@@ -2129,6 +2135,7 @@ function processClose(c: WritableStreamDefaultController): void {
         }
       }
       stream._state = "closed";
+      stream._closedWatch?.resolve(undefined);
       const writer = stream._writer;
       if (writer !== undefined) writer._closed.resolve(undefined);
     },
@@ -2203,6 +2210,7 @@ function startErroring(stream: WritableStream<any>, reason: any): void {
 
 function finishErroring(stream: WritableStream<any>): void {
   stream._state = "errored";
+  stream._closedWatch?.reject(stream._storedError);
   const c = stream._controller;
   resetQueue(c);
   const storedError = stream._storedError;
@@ -3051,3 +3059,26 @@ describeAs(WritableStreamDefaultController, (c: WritableStreamDefaultController)
 describeAs(TransformStreamDefaultController, (c: TransformStreamDefaultController<any>) => ["TransformStreamDefaultController", [["stream", c._stream]]]);
 describeAs(CountQueuingStrategy, (q: CountQueuingStrategy) => ["CountQueuingStrategy", [["highWaterMark", q._highWaterMark]]]);
 describeAs(ByteLengthQueuingStrategy, (q: ByteLengthQueuingStrategy) => ["ByteLengthQueuingStrategy", [["highWaterMark", q._highWaterMark]]]);
+
+/** A promise settled when `stream` closes or errors: what Node's streams
+ * (`finished()`) wait on for a web stream (Bun's $webStreamClosedPromise). */
+export function webStreamClosedPromise(stream: ReadableStream<any> | WritableStream<any>): Promise<void> {
+  if (stream._state === "closed") return Promise.resolve();
+  if (stream._state === "errored") return Promise.reject(stream._storedError);
+  if (stream._closedWatch === undefined) {
+    stream._closedWatch = deferred<void>();
+    handled(stream._closedWatch.promise);
+  }
+  return stream._closedWatch.promise;
+}
+
+/** Errors `stream` through its controller (Bun's $webStreamControllerError). */
+export function webStreamControllerError(stream: ReadableStream<any> | WritableStream<any>, e: any): void {
+  if (stream instanceof WritableStream) {
+    writableControllerError(stream._controller, e);
+  } else if (stream._controller instanceof ReadableByteStreamController) {
+    byteError(stream._controller, e);
+  } else {
+    controllerError(stream._controller, e);
+  }
+}

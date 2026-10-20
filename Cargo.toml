@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/beyond", "crates/beyond-rt", "crates/beyond-build"]
+members = ["crates/beyond", "crates/beyond-rt", "crates/beyond-build", "crates/bun-import"]
 # (Luminous is a workspace of its own, used by path.)
 exclude = ["vendor/luminous"]
 

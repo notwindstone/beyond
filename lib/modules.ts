@@ -7,8 +7,8 @@
 // (Luminous registers its modules by path): one instance of each.
 
 import { buildTranspile, cwd, importModule, importModuleSync, readFile, setModuleHooks, stat } from "beyond:native";
-import { basename, dirname } from "./node/path.ts";
-import { fileURLToPath, pathToFileURL } from "./node/url.ts";
+import { basename, dirname } from "./sys/path.ts";
+import { fileURLToPath, pathToFileURL } from "./sys/url.ts";
 import { isBuiltin, resolveFile } from "./resolve.ts";
 
 /** Beyond's lib/ (this module's directory). */
@@ -64,14 +64,24 @@ function metaOf(path: string): object {
   };
 }
 
+/** The file of built-in module `name` (`fs/promises`) in lib/node: Bun's
+ * modules are TypeScript, a few JavaScript. */
+function builtinFile(name: string): string | undefined {
+  for (const ext of [".ts", ".js"]) {
+    const file = `${LIB}/node/${name}${ext}`;
+    if (stat(file, true, false) !== undefined) return file;
+  }
+  return undefined;
+}
+
 /** What module `name` is: the program's, a CommonJS module's exports, or
  * JavaScript to compile. */
 function load(name: string): { code?: string; exports?: object; meta?: object } {
   const shared = registry()?.get(name);
   if (shared !== undefined) return { exports: shared() };
   if (name.startsWith("node:")) {
-    const file = `${LIB}/node/${name.slice(5)}.ts`;
-    if (stat(file, true, false) === undefined) {
+    const file = builtinFile(name.slice(5));
+    if (file === undefined) {
       const e = new Error(`Beyond does not have the built-in module "${name}" yet`);
       (e as any).code = "ERR_UNKNOWN_BUILTIN_MODULE";
       throw e;
@@ -129,9 +139,8 @@ export function libModuleSync(file: string): any {
  * process.getBuiltinModule. */
 export function builtinModule(name: string): unknown {
   if (!isBuiltin(name) || name.startsWith("bun:")) return undefined;
-  const file = `${LIB}/node/${name.startsWith("node:") ? name.slice(5) : name}.ts`;
   // (One Beyond does not have yet: none, as an unknown one.)
-  if (stat(file, true, false) === undefined) return undefined;
+  if (builtinFile(name.startsWith("node:") ? name.slice(5) : name) === undefined) return undefined;
   const ns: any = importModuleSync(resolveName(name, "/"));
   return ns?.default ?? ns;
 }

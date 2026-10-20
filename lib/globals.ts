@@ -16,6 +16,16 @@ import { Buffer } from "./node/buffer.ts";
 import { process } from "./process.ts";
 import { FormData } from "./formdata.ts";
 import { inspect } from "./inspect.ts";
+import {
+  Performance,
+  PerformanceEntry,
+  PerformanceMark,
+  PerformanceMeasure,
+  PerformanceObserver,
+  PerformanceObserverEntryList,
+  PerformanceResourceTiming,
+  performance,
+} from "./performance.ts";
 import { serve } from "./serve.ts";
 import {
   ByteLengthQueuingStrategy,
@@ -33,8 +43,9 @@ import {
   WritableStreamDefaultWriter,
 } from "./streams.ts";
 import { fetch } from "./client.ts";
-import { clearInterval, clearTimeout, setInterval, setTimeout } from "./timers.ts";
+import { clearImmediate, clearInterval, clearTimeout, setImmediate, setInterval, setTimeout } from "./timers.ts";
 import { URL, URLSearchParams } from "./url.ts";
+import { fileURLToPath, pathToFileURL } from "./sys/url.ts";
 
 const g = globalThis as any;
 
@@ -48,7 +59,14 @@ define("setTimeout", setTimeout);
 define("setInterval", setInterval);
 define("clearTimeout", clearTimeout);
 define("clearInterval", clearInterval);
-if (g.performance === undefined) define("performance", { now, timeOrigin: Date.now() - now() });
+define("performance", performance);
+define("Performance", Performance);
+define("PerformanceEntry", PerformanceEntry);
+define("PerformanceMark", PerformanceMark);
+define("PerformanceMeasure", PerformanceMeasure);
+define("PerformanceObserver", PerformanceObserver);
+define("PerformanceObserverEntryList", PerformanceObserverEntryList);
+define("PerformanceResourceTiming", PerformanceResourceTiming);
 define("TextEncoder", TextEncoder);
 define("TextDecoder", TextDecoder);
 define("Event", Event);
@@ -87,6 +105,9 @@ define("fetch", fetch);
 if (g.self === undefined) define("self", globalThis);
 define("process", process);
 define("Buffer", Buffer);
+define("global", globalThis);
+define("setImmediate", setImmediate);
+define("clearImmediate", clearImmediate);
 (globalThis as any)[Symbol.for("beyond.builtin")] = builtinModule;
 /** Bun.sleep: a promise fulfilled after `ms` milliseconds (or at a Date). */
 function sleep(ms: number | Date): Promise<void> {
@@ -149,6 +170,31 @@ const runtime = {
   Transpiler,
   env: process.env,
   argv: process.argv,
+  /** (One thread runs JavaScript: the main one.) */
+  isMainThread: true,
+  fileURLToPath,
+  pathToFileURL,
+  /** Bun.nanoseconds: nanoseconds since the program started. */
+  nanoseconds(): number {
+    return Math.floor(now() * 1e6);
+  },
+  /** Bun.stringWidth: the columns a string takes in a terminal. */
+  stringWidth(s: unknown, options?: { countAnsiEscapeCodes?: boolean }): number {
+    return import.meta.require("node:internal/bindings/stringWidth").jsFunctionBunStringWidth(s, options);
+  },
+  /** Bun.spawn: a child process (lib/spawn.ts, evaluated when first used). */
+  spawn(cmd: any, options?: any): any {
+    return import.meta.require("./spawn.ts").spawn(cmd, options);
+  },
+  /** Bun.spawnSync: a child process, run to its end. */
+  spawnSync(cmd: any, options?: any): any {
+    return import.meta.require("./spawn.ts").spawnSync(cmd, options);
+  },
+  /** Bun.deepEquals: Node's deep equality, strict or loose. */
+  deepEquals(a: unknown, b: unknown, strict?: boolean): boolean {
+    const m = import.meta.require("node:internal/util/deep_equal");
+    return strict ? m.isDeepStrictEqual(a, b) : m.isDeepEqual(a, b);
+  },
   get main(): string {
     return process.argv[1] ?? "";
   },

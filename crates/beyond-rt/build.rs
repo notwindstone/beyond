@@ -48,6 +48,10 @@ fn main() {
         "native/web.c",
         "native/client.c",
         "native/system.c",
+        "native/node.c",
+        "native/fs.c",
+        "native/spawn.c",
+        "native/buffer.c",
     ] {
         c.file(f);
     }

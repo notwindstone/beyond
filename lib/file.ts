@@ -4,10 +4,9 @@
 import { readFile, stat, unlink, writeFile } from "beyond:native";
 import { Blob } from "./blob.ts";
 import { describe, Formatter } from "./inspect.ts";
-import { mkdirSync } from "./node/fs.ts";
-import { Stats } from "./node/fs.ts";
-import { dirname } from "./node/path.ts";
-import { fileURLToPath } from "./node/url.ts";
+import { mkdirp } from "./sys/fs.ts";
+import { dirname } from "./sys/path.ts";
+import { fileURLToPath } from "./sys/url.ts";
 import { ReadableStream, streamOfBytes } from "./streams.ts";
 
 /** MIME types by extension (Bun's for the common ones). */
@@ -127,8 +126,8 @@ export class BunFile extends Blob {
     return st !== undefined && (st.mode & 0o170000) !== 0o040000;
   }
 
-  async stat(): Promise<Stats> {
-    return new Stats(stat(this.#path, true, true));
+  async stat(): Promise<any> {
+    return import.meta.require("node:fs").default.statSync(this.#path);
   }
 
   write(data: unknown): Promise<number> {
@@ -171,6 +170,6 @@ async function contentOf(data: unknown): Promise<string | Uint8Array> {
 export async function write(dest: unknown, data: unknown, options?: { createPath?: boolean; mode?: number }): Promise<number> {
   const path = dest instanceof BunFile ? (dest as any).name : pathOf(dest as string | URL);
   const content = await contentOf(data);
-  if (options?.createPath !== false) mkdirSync(dirname(path), { recursive: true });
+  if (options?.createPath !== false) mkdirp(dirname(path));
   return writeFile(path, content, false, options?.mode) as number;
 }

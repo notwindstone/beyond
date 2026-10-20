@@ -141,6 +141,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bun-import"
+version = "0.1.0"
+dependencies = [
+ "oxc",
+ "serde_json",
+]
+
+[[package]]
 name = "bytecount"
 version = "0.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

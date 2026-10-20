@@ -32,6 +32,7 @@ unsafe extern "C" {
     fn us_loop_run_bun_tick(loop_: *mut c_void, timeout: *const Timespec, now_ns: u64);
     fn beyond_loop_num_polls(loop_: *mut c_void) -> c_int;
     fn beyond_client_idle_count() -> c_int;
+    fn beyond_spawn_unrefd() -> c_int;
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
@@ -167,8 +168,11 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
             }
         }
         // SAFETY: the loop is live.
-        // (Idle keep-alive connections of fetch() do not keep it alive.)
-        let polls = unsafe { beyond_loop_num_polls(uloop) - beyond_client_idle_count() };
+        // (Idle keep-alive connections of fetch() do not keep it alive, nor
+        // the unreferenced children and pipes of Bun.spawn: those are still
+        // polled while something else does.)
+        let all = unsafe { beyond_loop_num_polls(uloop) };
+        let polls = all - unsafe { beyond_client_idle_count() + beyond_spawn_unrefd() };
         let (refd, next) = TIMERS.with_borrow_mut(|t| (t.refd(), t.next().map(|n| n.0)));
         if polls == 0 && !refd {
             return 0;
@@ -178,7 +182,7 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         unsafe { beyond_flush_stdout() };
         let now = now_ns();
         let wait = next.map(|d| d.saturating_sub(now));
-        if polls == 0 {
+        if all == 0 {
             // Only timers: sleep until the next.
             std::thread::sleep(Duration::from_nanos(wait.unwrap_or(0)));
             continue;

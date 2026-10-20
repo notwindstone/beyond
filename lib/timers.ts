@@ -95,3 +95,113 @@ export function clearTimeout(timer: Timeout | number | undefined | null): void {
 export function clearInterval(timer: Timeout | number | undefined | null): void {
   clear(timer);
 }
+
+// ---- setImmediate: Node's check phase ----
+// Immediates run in turns, after the timers due: each turn runs those set
+// before it began (one set by an immediate waits for the next turn). A
+// zero-delay timer starts a turn; it keeps the program alive while an
+// immediate that is ref'd waits.
+
+export class Immediate {
+  _onImmediate: Callback | null;
+  _args: any[];
+  _ref = true;
+  constructor(callback: Callback, args: any[]) {
+    this._onImmediate = callback;
+    this._args = args;
+  }
+  ref(): this {
+    if (!this._ref && this._onImmediate !== null) {
+      this._ref = true;
+      refs++;
+      keepAlive();
+    }
+    this._ref = true;
+    return this;
+  }
+  unref(): this {
+    if (this._ref && this._onImmediate !== null) {
+      this._ref = false;
+      refs--;
+      keepAlive();
+    }
+    this._ref = false;
+    return this;
+  }
+  hasRef(): boolean {
+    return this._ref;
+  }
+  [Symbol.dispose](): void {
+    clearImmediate(this);
+  }
+}
+
+let queue: Immediate[] = [];
+let turn: Timeout | undefined;
+/** How many waiting immediates are ref'd. */
+let refs = 0;
+
+function keepAlive(): void {
+  if (turn !== undefined) refs > 0 ? turn.ref() : turn.unref();
+}
+
+function runImmediates(): void {
+  turn = undefined;
+  const batch = queue;
+  queue = [];
+  let i = 0;
+  try {
+    for (; i < batch.length; i++) {
+      const im = batch[i];
+      const callback = im._onImmediate;
+      if (callback === null) continue;
+      im._onImmediate = null;
+      if (im._ref) refs--;
+      callback(...im._args);
+    }
+  } finally {
+    // (After one that threw: the rest in the next turn, first.)
+    if (i < batch.length) {
+      queue = batch.slice(i + 1).concat(queue);
+      if (queue.length > 0) startTurn();
+    }
+  }
+  if (queue.length > 0 && turn === undefined) startTurn();
+}
+
+function startTurn(): void {
+  turn = set(runImmediates, 0, [], false);
+  keepAlive();
+}
+
+/** How Node's errors describe a value they did not take. */
+function received(v: unknown): string {
+  if (v === undefined || v === null) return String(v);
+  if (typeof v === "object") return v.constructor?.name ? `an instance of ${v.constructor.name}` : "[Object: null prototype]";
+  let shown = typeof v === "string" ? `'${v.length > 25 ? v.slice(0, 25) + "..." : v}'` : String(v);
+  if (typeof v === "bigint") shown += "n";
+  return `type ${typeof v} (${shown})`;
+}
+
+export function setImmediate(callback: Callback, ...args: any[]): Immediate {
+  if (typeof callback !== "function") {
+    const e = new TypeError(`The "callback" argument must be of type function. Received ${received(callback)}`) as TypeError & { code: string };
+    e.code = "ERR_INVALID_ARG_TYPE";
+    throw e;
+  }
+  const im = new Immediate(callback, args);
+  queue.push(im);
+  refs++;
+  if (turn === undefined) startTurn();
+  else keepAlive();
+  return im;
+}
+
+export function clearImmediate(im: Immediate | undefined | null): void {
+  if (!(im instanceof Immediate) || im._onImmediate === null) return;
+  im._onImmediate = null;
+  if (im._ref) {
+    refs--;
+    keepAlive();
+  }
+}

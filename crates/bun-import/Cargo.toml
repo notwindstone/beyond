@@ -1,0 +1,11 @@
+[package]
+name = "bun-import"
+description = "Imports Bun's Node.js modules (src/js) into lib/node as ES modules"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+oxc = { version = "0.153.0", features = ["semantic", "ast_visit"] }
+serde_json = "1"

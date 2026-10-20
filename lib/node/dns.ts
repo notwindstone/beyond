@@ -1,0 +1,1094 @@
+// Hardcoded module "node:dns"
+import { process } from "beyond:process";
+import { Resolver_getRuntimeDefaultResultOrderOption as __native_dns_Resolver_getRuntimeDefaultResultOrderOption } from "node:internal/bindings/dns";
+import { Resolver_newResolver as __native_dns_Resolver_newResolver } from "node:internal/bindings/dns";
+import { $ERR_INVALID_ARG_TYPE, $ERR_INVALID_ARG_VALUE, $ERR_INVALID_IP_ADDRESS, $ERR_MISSING_ARGS } from "node:internal/intrinsics";
+const dns = Bun.dns;
+const utilPromisifyCustomSymbol = Symbol.for("nodejs.util.promisify.custom");
+import { isIP } from "node:internal/net/isIP";
+import { guardCallback } from "node:internal/shared";
+import { validateFunction, validateArray, validateString, validateBoolean, validateNumber, validateInt32, validatePort } from "node:internal/validators";
+
+const errorCodes = {
+  NODATA: "ENODATA",
+  FORMERR: "EFORMERR",
+  SERVFAIL: "ESERVFAIL",
+  NOTFOUND: "ENOTFOUND",
+  NOTIMP: "ENOTIMP",
+  REFUSED: "EREFUSED",
+  BADQUERY: "EBADQUERY",
+  BADNAME: "EBADNAME",
+  BADFAMILY: "EBADFAMILY",
+  BADRESP: "EBADRESP",
+  CONNREFUSED: "ECONNREFUSED",
+  TIMEOUT: "ETIMEOUT",
+  EOF: "EOF",
+  FILE: "EFILE",
+  NOMEM: "ENOMEM",
+  DESTRUCTION: "EDESTRUCTION",
+  BADSTR: "EBADSTR",
+  BADFLAGS: "EBADFLAGS",
+  NONAME: "ENONAME",
+  BADHINTS: "EBADHINTS",
+  NOTINITIALIZED: "ENOTINITIALIZED",
+  LOADIPHLPAPI: "ELOADIPHLPAPI",
+  ADDRGETNETWORKPARAMS: "EADDRGETNETWORKPARAMS",
+  CANCELLED: "ECANCELLED",
+};
+
+type ServerTriple = Bun.dns.ServerTriple;
+type NativeResolver = Bun.dns.NativeResolver;
+type NewNativeResolver = (options: { timeout: number; tries: number }) => NativeResolver;
+
+interface DNSException extends Error {
+  errno?: number;
+  syscall?: string;
+}
+
+const IANA_DNS_PORT = 53;
+const IPv6RE = /^\[([^[\]]*)\]/;
+const addrSplitRE = /(^.+?)(?::(\d+))?$/;
+
+function translateErrorCode(promise: Promise<any>) {
+  return promise.catch(error => {
+    return Promise.reject(withTranslatedError(error));
+  });
+}
+
+// We prefix the error codes with "DNS_" to make it clear it's a DNS error code.
+// Node does not do this, so we have to translate.
+function withTranslatedError(error: any) {
+  const code = error?.code;
+  if (code?.startsWith?.("DNS_")) {
+    error.code = code.slice(4);
+  }
+  return error;
+}
+
+function getServers() {
+  return dns.getServers();
+}
+
+function setServers(servers) {
+  return setServersOn(servers, dns);
+}
+
+const getRuntimeDefaultResultOrderOption = __native_dns_Resolver_getRuntimeDefaultResultOrderOption;
+
+function newResolver(options) {
+  if (!newResolver.native) {
+    newResolver.native = __native_dns_Resolver_newResolver as NewNativeResolver;
+  }
+  return newResolver.native(options);
+}
+declare namespace newResolver {
+  export let native: NewNativeResolver | undefined;
+}
+
+function defaultResultOrder() {
+  if (typeof defaultResultOrder.value === "undefined") {
+    defaultResultOrder.value = getRuntimeDefaultResultOrderOption();
+  }
+
+  return defaultResultOrder.value;
+}
+declare namespace defaultResultOrder {
+  export let value: string | undefined;
+}
+
+function setDefaultResultOrder(order) {
+  validateOrder(order);
+  defaultResultOrder.value = order;
+}
+
+function getDefaultResultOrder() {
+  return defaultResultOrder();
+}
+
+// ares_inet_pton rejects IPv6 zone identifiers; Node's uv_inet_pton strips them.
+function stripZoneId(host) {
+  const pct = host.indexOf("%");
+  return pct === -1 ? host : host.slice(0, pct);
+}
+
+function setServersOn(servers, object) {
+  validateArray(servers, "servers");
+
+  const triples: ServerTriple[] = [];
+
+  servers.forEach((server, i) => {
+    validateString(server, `servers[${i}]`);
+    let ipVersion = isIP(server);
+
+    if (ipVersion !== 0) {
+      triples.push([ipVersion, ipVersion === 6 ? stripZoneId(server) : server, IANA_DNS_PORT]);
+      return;
+    }
+
+    const match = IPv6RE.exec(server);
+
+    // Check for an IPv6 in brackets.
+    if (match) {
+      ipVersion = isIP(match[1]);
+      if (ipVersion !== 0) {
+        const port = parseInt(addrSplitRE[Symbol.replace](server, "$2")) || IANA_DNS_PORT;
+        triples.push([ipVersion, stripZoneId(match[1]), port]);
+        return;
+      }
+    }
+
+    // addr:port
+    const addrSplitMatch = addrSplitRE.exec(server);
+
+    if (addrSplitMatch) {
+      const hostIP = addrSplitMatch[1];
+      const port = addrSplitMatch[2] ? parseInt(addrSplitMatch[2]) : IANA_DNS_PORT;
+
+      ipVersion = isIP(hostIP);
+
+      if (ipVersion !== 0) {
+        triples.push([ipVersion, hostIP, port]);
+        return;
+      }
+    }
+
+    throw $ERR_INVALID_IP_ADDRESS(server);
+  });
+
+  object.setServers(triples);
+}
+
+function validateFlagsOption(options) {
+  if (options.flags == null) {
+    return;
+  }
+
+  const flags = options.flags;
+  validateNumber(flags, "options.flags");
+
+  if ((flags & ~(dns.ALL | dns.ADDRCONFIG | dns.V4MAPPED)) != 0) {
+    throw $ERR_INVALID_ARG_VALUE("hints", flags, "is invalid");
+  }
+}
+
+function validateFamily(family) {
+  if (family !== 6 && family !== 4 && family !== 0) {
+    throw $ERR_INVALID_ARG_VALUE("family", family, "must be one of 0, 4 or 6");
+  }
+}
+
+function validateFamilyOption(options) {
+  if (options.family != null) {
+    switch (options.family) {
+      case "IPv4":
+        options.family = 4;
+        break;
+      case "IPv6":
+        options.family = 6;
+        break;
+      default:
+        validateFamily(options.family);
+        break;
+    }
+  }
+}
+
+function validateAllOption(options) {
+  const all = options.all;
+  if (all != null) {
+    validateBoolean(all, "options.all");
+  }
+}
+
+function validateVerbatimOption(options) {
+  const verbatim = options.verbatim;
+  if (verbatim != null) {
+    validateBoolean(verbatim, "options.verbatim");
+  }
+}
+
+function validateOrder(order) {
+  if (!["ipv4first", "ipv6first", "verbatim"].includes(order)) {
+    throw $ERR_INVALID_ARG_VALUE("order", order, "is invalid");
+  }
+}
+
+function validateOrderOption(options) {
+  const order = options.order;
+  if (order !== undefined) {
+    validateOrder(order);
+  }
+}
+
+// Validates and returns the callback wrapped by guardCallback.
+// Callers must use the return value, not the argument.
+function validateResolve(hostname, callback) {
+  if (typeof hostname !== "string") {
+    throw $ERR_INVALID_ARG_TYPE("hostname", "string", hostname);
+  }
+
+  if (typeof callback !== "function") {
+    throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+  }
+
+  return guardCallback(callback);
+}
+
+function validateLocalAddresses(first, second) {
+  validateString(first, "ipv4");
+  if (typeof second !== "undefined") {
+    validateString(second, "ipv6");
+  }
+}
+
+function invalidHostname(hostname) {
+  if (invalidHostname.warned) {
+    return;
+  }
+
+  invalidHostname.warned = true;
+  process.emitWarning(
+    `The provided hostname "${String(hostname)}" is not a valid hostname, and is supported in the dns module solely for compatibility.`,
+    "DeprecationWarning",
+    "DEP0118",
+  );
+}
+declare namespace invalidHostname {
+  export let warned: boolean | undefined;
+}
+
+function translateLookupOptions(options) {
+  if (!options || typeof options !== "object") {
+    options = { family: options };
+  }
+
+  let { family, order, verbatim, hints: flags, all } = options;
+
+  if (order === undefined && typeof verbatim === "boolean") {
+    order = verbatim ? "verbatim" : "ipv4first";
+  }
+
+  order ??= defaultResultOrder();
+
+  return {
+    family,
+    flags,
+    all,
+    order,
+    verbatim,
+    // dns.lookup()'s contract is getaddrinfo(3), so use the platform resolver, not c-ares.
+    backend: "system",
+  };
+}
+
+function validateLookupOptions(options) {
+  validateFlagsOption(options);
+  validateFamilyOption(options);
+  validateAllOption(options);
+  validateVerbatimOption(options);
+  validateOrderOption(options);
+}
+
+function lookup(hostname, options, callback?) {
+  if (typeof hostname !== "string" && hostname) {
+    throw $ERR_INVALID_ARG_TYPE("hostname", "string", hostname);
+  }
+
+  if (typeof options === "function") {
+    callback = options;
+    options = { family: 0 };
+  } else if (typeof options === "number") {
+    validateFunction(callback, "callback");
+    validateFamily(options);
+    options = { family: options };
+  } else if (options !== undefined && typeof options !== "object") {
+    validateFunction(arguments.length === 2 ? options : callback, "callback");
+    throw $ERR_INVALID_ARG_TYPE("options", ["integer", "object"], options);
+  }
+
+  validateFunction(callback, "callback");
+
+  options = translateLookupOptions(options);
+  validateLookupOptions(options);
+
+  if (!hostname) {
+    invalidHostname(hostname);
+    if (options.all) {
+      callback(null, []);
+    } else {
+      callback(null, null, 4);
+    }
+    return;
+  }
+
+  const family = isIP(hostname);
+  if (family) {
+    if (options.all) {
+      process.nextTick(callback, null, [{ address: hostname, family }]);
+    } else {
+      process.nextTick(callback, null, hostname, family);
+    }
+    return;
+  }
+
+  callback = guardCallback(callback);
+  dns
+    .lookup(hostname, options)
+    .then(res => {
+      throwIfEmpty(res);
+
+      if (options.order == "ipv4first") {
+        res.sort((a, b) => a.family - b.family);
+      } else if (options.order == "ipv6first") {
+        res.sort((a, b) => b.family - a.family);
+      }
+
+      if (options?.all) {
+        callback(null, res.map(mapLookupAll));
+      } else {
+        const [{ address, family }] = res;
+        callback(null, address, family);
+      }
+    })
+    .catch(err => {
+      if (err.code?.startsWith("DNS_")) err.code = err.code.slice(4);
+      // Node.js getaddrinfo errors (DNSException) carry the looked-up
+      // hostname both as a property and at the end of the message.
+      const syscall = err.syscall;
+      if (syscall === "getaddrinfo" && !err.hostname && hostname) {
+        err.hostname = hostname;
+        err.message = `${syscall} ${err.code} ${hostname}`;
+      }
+      callback(err, undefined, undefined);
+    });
+}
+
+function lookupService(address, port, callback) {
+  if (arguments.length < 3) {
+    throw $ERR_MISSING_ARGS("address", "port", "callback");
+  }
+
+  if (isIP(address) === 0) {
+    throw $ERR_INVALID_ARG_VALUE("address", address);
+  }
+  validatePort(port, "port");
+  if (typeof callback !== "function") {
+    throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+  }
+
+  callback = guardCallback(callback);
+  dns.lookupService(address, +port).then(
+    results => {
+      callback(null, ...results);
+    },
+    error => {
+      callback(withTranslatedError(error));
+    },
+  );
+}
+
+function validateResolverOptions(options) {
+  const { timeout = -1, tries = 4 } = { ...options };
+  validateInt32(timeout, "options.timeout", -1);
+  validateInt32(tries, "options.tries", 1);
+  return { timeout, tries };
+}
+
+class Resolver {
+  declare _handle: NativeResolver;
+  #resolver: NativeResolver;
+
+  constructor(options) {
+    this.#resolver = this._handle = newResolver(validateResolverOptions(options));
+  }
+
+  cancel() {
+    this.#resolver.cancel();
+  }
+
+  static #getResolver(object) {
+    return typeof object !== "undefined" && #resolver in object ? object.#resolver : dns;
+  }
+
+  getServers() {
+    return Resolver.#getResolver(this).getServers() || [];
+  }
+
+  resolve(hostname, rrtype, callback) {
+    if (typeof rrtype === "function") {
+      callback = rrtype;
+      rrtype = "A";
+    } else if (typeof rrtype !== "string") {
+      throw $ERR_INVALID_ARG_TYPE("rrtype", "string", rrtype);
+    }
+
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolve(hostname, rrtype)
+      .then(
+        results => {
+          switch (rrtype?.toLowerCase()) {
+            case "a":
+            case "aaaa":
+              callback(null, results.map(mapResolveX));
+              break;
+            default:
+              callback(null, results);
+              break;
+          }
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolve4(hostname, options, callback) {
+    if (arguments.length <= 2) {
+      callback = options;
+      options = null;
+    }
+
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolve(hostname, "A")
+      .then(
+        addresses => {
+          callback(null, options?.ttl ? addresses : addresses.map(mapResolveX));
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolve6(hostname, options, callback) {
+    if (arguments.length <= 2) {
+      callback = options;
+      options = null;
+    }
+
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolve(hostname, "AAAA")
+      .then(
+        addresses => {
+          callback(null, options?.ttl ? addresses : addresses.map(mapResolveX));
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveAny(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveAny(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveCname(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveCname(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveMx(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveMx(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveNaptr(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveNaptr(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveNs(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveNs(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolvePtr(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolvePtr(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveSrv(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    callback = validateResolve(hostname, callback);
+
+    Resolver.#getResolver(this)
+      .resolveSrv(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveCaa(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    if (typeof callback !== "function") {
+      throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+    }
+    callback = guardCallback(callback);
+
+    Resolver.#getResolver(this)
+      .resolveCaa(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  resolveTxt(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    if (typeof callback !== "function") {
+      throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+    }
+    callback = guardCallback(callback);
+
+    Resolver.#getResolver(this)
+      .resolveTxt(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+  resolveSoa(hostname, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    if (typeof callback !== "function") {
+      throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+    }
+    callback = guardCallback(callback);
+
+    Resolver.#getResolver(this)
+      .resolveSoa(hostname)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  reverse(ip, callback) {
+    if (arguments.length > 2) {
+      callback = arguments[2];
+    }
+    if (typeof callback !== "function") {
+      throw $ERR_INVALID_ARG_TYPE("callback", "function", callback);
+    }
+    callback = guardCallback(callback);
+
+    Resolver.#getResolver(this)
+      .reverse(ip)
+      .then(
+        results => {
+          callback(null, results);
+        },
+        error => {
+          callback(withTranslatedError(error));
+        },
+      );
+  }
+
+  setLocalAddress(first, second) {
+    validateLocalAddresses(first, second);
+    this.#resolver.setLocalAddress(first, second);
+  }
+
+  setServers(servers) {
+    return setServersOn(servers, Resolver.#getResolver(this));
+  }
+}
+
+var {
+  resolve,
+  resolve4,
+  resolve6,
+  resolveAny,
+  resolveCname,
+  resolveCaa,
+  resolveMx,
+  resolveNaptr,
+  resolveNs,
+  resolvePtr,
+  resolveSoa,
+  resolveSrv,
+  reverse,
+  resolveTxt,
+} = Resolver.prototype;
+
+const mapLookupAll = res => {
+  const { address, family } = res;
+  return { address, family };
+};
+
+function throwIfEmpty(res) {
+  if (res.length === 0) {
+    const err: DNSException = new Error("No records found");
+    err.name = "DNSException";
+    err.code = "ENODATA";
+    // Hardcoded errno
+    err.errno = 1;
+    err.syscall = "getaddrinfo";
+    throw err;
+  }
+}
+Object.defineProperty(throwIfEmpty, "name", { value: "::bunternal::" });
+
+const promisifyLookup = order => res => {
+  throwIfEmpty(res);
+  if (order == "ipv4first") {
+    res.sort((a, b) => a.family - b.family);
+  } else if (order == "ipv6first") {
+    res.sort((a, b) => b.family - a.family);
+  }
+  const [{ address, family }] = res;
+  return { address, family };
+};
+
+const promisifyLookupAll = order => res => {
+  throwIfEmpty(res);
+  if (order == "ipv4first") {
+    res.sort((a, b) => a.family - b.family);
+  } else if (order == "ipv6first") {
+    res.sort((a, b) => b.family - a.family);
+  }
+  return res.map(mapLookupAll);
+};
+
+const mapResolveX = a => a.address;
+
+const promisifyResolveX = ttl => {
+  if (ttl) {
+    return res => res;
+  } else {
+    return res => {
+      return res?.map(mapResolveX);
+    };
+  }
+};
+
+// promisified versions
+const promises = {
+  ...errorCodes,
+
+  lookup(hostname, options) {
+    if (typeof hostname !== "string" && hostname) {
+      throw $ERR_INVALID_ARG_TYPE("hostname", "string", hostname);
+    }
+
+    if (typeof options === "number") {
+      validateFamily(options);
+      options = { family: options };
+    } else if (options !== undefined && typeof options !== "object") {
+      throw $ERR_INVALID_ARG_TYPE("options", ["integer", "object"], options);
+    }
+
+    options = translateLookupOptions(options);
+    validateLookupOptions(options);
+
+    if (!hostname) {
+      invalidHostname(hostname);
+      return Promise.resolve(
+        options.all
+          ? []
+          : {
+              address: null,
+              family: 4,
+            },
+      );
+    }
+
+    const family = isIP(hostname);
+    if (family) {
+      const obj = { address: hostname, family };
+      return Promise.resolve(options.all ? [obj] : obj);
+    }
+
+    if (options.all) {
+      return translateErrorCode(dns.lookup(hostname, options).then(promisifyLookupAll(options.order)));
+    }
+    return translateErrorCode(dns.lookup(hostname, options).then(promisifyLookup(options.order)));
+  },
+
+  lookupService(address, port) {
+    if (arguments.length !== 2) {
+      throw $ERR_MISSING_ARGS("address", "port");
+    }
+
+    if (isIP(address) === 0) {
+      throw $ERR_INVALID_ARG_VALUE("address", address);
+    }
+    validatePort(port, "port");
+
+    try {
+      return translateErrorCode(dns.lookupService(address, +port)).then(([hostname, service]) => ({
+        hostname,
+        service,
+      }));
+    } catch (err) {
+      if ((err as Error).name === "TypeError" || (err as Error).name === "RangeError") {
+        throw err;
+      }
+      return Promise.reject(withTranslatedError(err));
+    }
+  },
+
+  resolve(hostname, rrtype) {
+    if (typeof hostname !== "string") {
+      throw $ERR_INVALID_ARG_TYPE("hostname", "string", hostname);
+    }
+
+    if (typeof rrtype === "undefined") {
+      rrtype = "A";
+    } else if (typeof rrtype !== "string") {
+      throw $ERR_INVALID_ARG_TYPE("rrtype", "string", rrtype);
+    }
+
+    switch (rrtype?.toLowerCase()) {
+      case "a":
+      case "aaaa":
+        return translateErrorCode(dns.resolve(hostname, rrtype).then(promisifyResolveX(false)));
+      default:
+        return translateErrorCode(dns.resolve(hostname, rrtype));
+    }
+  },
+
+  resolve4(hostname, options) {
+    return translateErrorCode(dns.resolve(hostname, "A").then(promisifyResolveX(options?.ttl)));
+  },
+
+  resolve6(hostname, options) {
+    return translateErrorCode(dns.resolve(hostname, "AAAA").then(promisifyResolveX(options?.ttl)));
+  },
+
+  resolveAny(hostname) {
+    return translateErrorCode(dns.resolveAny(hostname));
+  },
+  resolveSrv(hostname) {
+    return translateErrorCode(dns.resolveSrv(hostname));
+  },
+  resolveTxt(hostname) {
+    return translateErrorCode(dns.resolveTxt(hostname));
+  },
+  resolveSoa(hostname) {
+    return translateErrorCode(dns.resolveSoa(hostname));
+  },
+  resolveNaptr(hostname) {
+    return translateErrorCode(dns.resolveNaptr(hostname));
+  },
+  resolveMx(hostname) {
+    return translateErrorCode(dns.resolveMx(hostname));
+  },
+  resolveCaa(hostname) {
+    return translateErrorCode(dns.resolveCaa(hostname));
+  },
+  resolveNs(hostname) {
+    return translateErrorCode(dns.resolveNs(hostname));
+  },
+  resolvePtr(hostname) {
+    return translateErrorCode(dns.resolvePtr(hostname));
+  },
+  resolveCname(hostname) {
+    return translateErrorCode(dns.resolveCname(hostname));
+  },
+  reverse(ip) {
+    return translateErrorCode(dns.reverse(ip));
+  },
+
+  Resolver: class Resolver {
+    declare _handle: NativeResolver;
+    #resolver: NativeResolver;
+
+    constructor(options) {
+      this.#resolver = this._handle = newResolver(validateResolverOptions(options));
+    }
+
+    cancel() {
+      this.#resolver.cancel();
+    }
+
+    static #getResolver(object) {
+      return typeof object !== "undefined" && #resolver in object ? object.#resolver : dns;
+    }
+
+    getServers() {
+      return Resolver.#getResolver(this).getServers() || [];
+    }
+
+    resolve(hostname, rrtype) {
+      if (typeof rrtype === "undefined") {
+        rrtype = "A";
+      } else if (typeof rrtype !== "string") {
+        rrtype = null;
+      }
+      switch (rrtype?.toLowerCase()) {
+        case "a":
+        case "aaaa":
+          return translateErrorCode(
+            Resolver.#getResolver(this).resolve(hostname, rrtype).then(promisifyResolveX(false)),
+          );
+        default:
+          return translateErrorCode(Resolver.#getResolver(this).resolve(hostname, rrtype));
+      }
+    }
+
+    resolve4(hostname, options) {
+      return translateErrorCode(
+        Resolver.#getResolver(this).resolve(hostname, "A").then(promisifyResolveX(options?.ttl)),
+      );
+    }
+
+    resolve6(hostname, options) {
+      return translateErrorCode(
+        Resolver.#getResolver(this).resolve(hostname, "AAAA").then(promisifyResolveX(options?.ttl)),
+      );
+    }
+
+    resolveAny(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveAny(hostname));
+    }
+
+    resolveCname(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveCname(hostname));
+    }
+
+    resolveMx(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveMx(hostname));
+    }
+
+    resolveNaptr(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveNaptr(hostname));
+    }
+
+    resolveNs(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveNs(hostname));
+    }
+
+    resolvePtr(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolvePtr(hostname));
+    }
+
+    resolveSoa(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveSoa(hostname));
+    }
+
+    resolveSrv(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveSrv(hostname));
+    }
+
+    resolveCaa(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveCaa(hostname));
+    }
+
+    resolveTxt(hostname) {
+      return translateErrorCode(Resolver.#getResolver(this).resolveTxt(hostname));
+    }
+
+    reverse(ip) {
+      return translateErrorCode(Resolver.#getResolver(this).reverse(ip));
+    }
+
+    setLocalAddress(first, second) {
+      validateLocalAddresses(first, second);
+      this.#resolver.setLocalAddress(first, second);
+    }
+
+    setServers(servers) {
+      return setServersOn(servers, Resolver.#getResolver(this));
+    }
+  },
+
+  getDefaultResultOrder,
+  setDefaultResultOrder,
+  getServers,
+  setServers,
+};
+
+// Compatibility with util.promisify(dns[method])
+for (const [method, pMethod] of [
+  [lookup, promises.lookup],
+  [lookupService, promises.lookupService],
+  [resolve, promises.resolve],
+  [reverse, promises.reverse],
+  [resolve4, promises.resolve4],
+  [resolve6, promises.resolve6],
+  [resolveAny, promises.resolveAny],
+  [resolveCname, promises.resolveCname],
+  [resolveCaa, promises.resolveCaa],
+  [resolveMx, promises.resolveMx],
+  [resolveNs, promises.resolveNs],
+  [resolvePtr, promises.resolvePtr],
+  [resolveSoa, promises.resolveSoa],
+  [resolveSrv, promises.resolveSrv],
+  [resolveTxt, promises.resolveTxt],
+  [resolveNaptr, promises.resolveNaptr],
+]) {
+  method[utilPromisifyCustomSymbol] = pMethod;
+}
+
+const __default = {
+  ADDRCONFIG: dns.ADDRCONFIG,
+  ALL: dns.ALL,
+  V4MAPPED: dns.V4MAPPED,
+
+  // ERROR CODES
+  ...errorCodes,
+
+  lookup,
+  lookupService,
+  Resolver,
+  setServers,
+  setDefaultResultOrder,
+  getDefaultResultOrder,
+  resolve,
+  reverse,
+  resolve4,
+  resolve6,
+  resolveAny,
+  resolveCname,
+  resolveCaa,
+  resolveMx,
+  resolveNs,
+  resolvePtr,
+  resolveSoa,
+  resolveSrv,
+  resolveTxt,
+  resolveNaptr,
+  promises,
+  getServers,
+};
+export default __default;
+
+export { lookup, lookupService, Resolver, setServers, setDefaultResultOrder, getDefaultResultOrder, resolve, reverse, resolve4, resolve6, resolveAny, resolveCname, resolveCaa, resolveMx, resolveNs, resolvePtr, resolveSoa, resolveSrv, resolveTxt, resolveNaptr, promises, getServers };
+const __export_ADDRCONFIG = __default.ADDRCONFIG;
+const __export_ADDRGETNETWORKPARAMS = __default.ADDRGETNETWORKPARAMS;
+const __export_ALL = __default.ALL;
+const __export_BADFAMILY = __default.BADFAMILY;
+const __export_BADFLAGS = __default.BADFLAGS;
+const __export_BADHINTS = __default.BADHINTS;
+const __export_BADNAME = __default.BADNAME;
+const __export_BADQUERY = __default.BADQUERY;
+const __export_BADRESP = __default.BADRESP;
+const __export_BADSTR = __default.BADSTR;
+const __export_CANCELLED = __default.CANCELLED;
+const __export_CONNREFUSED = __default.CONNREFUSED;
+const __export_DESTRUCTION = __default.DESTRUCTION;
+const __export_EOF = __default.EOF;
+const __export_FILE = __default.FILE;
+const __export_FORMERR = __default.FORMERR;
+const __export_LOADIPHLPAPI = __default.LOADIPHLPAPI;
+const __export_NODATA = __default.NODATA;
+const __export_NOMEM = __default.NOMEM;
+const __export_NONAME = __default.NONAME;
+const __export_NOTFOUND = __default.NOTFOUND;
+const __export_NOTIMP = __default.NOTIMP;
+const __export_NOTINITIALIZED = __default.NOTINITIALIZED;
+const __export_REFUSED = __default.REFUSED;
+const __export_SERVFAIL = __default.SERVFAIL;
+const __export_TIMEOUT = __default.TIMEOUT;
+const __export_V4MAPPED = __default.V4MAPPED;
+export { __export_ADDRCONFIG as ADDRCONFIG, __export_ADDRGETNETWORKPARAMS as ADDRGETNETWORKPARAMS, __export_ALL as ALL, __export_BADFAMILY as BADFAMILY, __export_BADFLAGS as BADFLAGS, __export_BADHINTS as BADHINTS, __export_BADNAME as BADNAME, __export_BADQUERY as BADQUERY, __export_BADRESP as BADRESP, __export_BADSTR as BADSTR, __export_CANCELLED as CANCELLED, __export_CONNREFUSED as CONNREFUSED, __export_DESTRUCTION as DESTRUCTION, __export_EOF as EOF, __export_FILE as FILE, __export_FORMERR as FORMERR, __export_LOADIPHLPAPI as LOADIPHLPAPI, __export_NODATA as NODATA, __export_NOMEM as NOMEM, __export_NONAME as NONAME, __export_NOTFOUND as NOTFOUND, __export_NOTIMP as NOTIMP, __export_NOTINITIALIZED as NOTINITIALIZED, __export_REFUSED as REFUSED, __export_SERVFAIL as SERVFAIL, __export_TIMEOUT as TIMEOUT, __export_V4MAPPED as V4MAPPED };

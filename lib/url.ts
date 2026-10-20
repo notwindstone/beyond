@@ -1891,3 +1891,31 @@ export class URL {
     );
   }
 }
+
+// ---- Hosts, for node:url (lib/node/internal/bindings/NodeURL.ts) ----
+
+/** A special URL's host parsed from `input` (the serialized host), or null. */
+export function parseSpecialHost(input: string): string | null {
+  return parseHost(input, false);
+}
+
+/** UTS #46 ToASCII (CheckHyphens and the DNS length checks off), or null. */
+export function idnaToASCII(domain: string): string | null {
+  return domainToASCII(domain);
+}
+
+/** UTS #46 ToUnicode: punycode labels decoded (those that do not decode are
+ * kept), the others mapped. */
+export function idnaToUnicode(domain: string): string {
+  const labels = domain.split(".");
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    if (label.slice(0, 4).toLowerCase() === "xn--") {
+      const decoded = punycodeDecode(label.slice(4));
+      if (decoded !== null) labels[i] = decoded;
+    } else {
+      labels[i] = uts46Map(label) ?? label;
+    }
+  }
+  return labels.join(".");
+}

@@ -1,0 +1,33 @@
+"use strict";
+
+import __stream from "node:stream";
+import { process } from "beyond:process";
+process.emitWarning("The _stream_wrap module is deprecated.", "DeprecationWarning", "DEP0125");
+
+const __default = __stream;
+export default __default;
+const __export_Duplex = __default.Duplex;
+const __export_PassThrough = __default.PassThrough;
+const __export_Readable = __default.Readable;
+const __export_Stream = __default.Stream;
+const __export_Transform = __default.Transform;
+const __export_Writable = __default.Writable;
+const __export__isArrayBufferView = __default._isArrayBufferView;
+const __export__isUint8Array = __default._isUint8Array;
+const __export__uint8ArrayToBuffer = __default._uint8ArrayToBuffer;
+const __export_addAbortSignal = __default.addAbortSignal;
+const __export_compose = __default.compose;
+const __export_destroy = __default.destroy;
+const __export_duplexPair = __default.duplexPair;
+const __export_eos = __default.eos;
+const __export_finished = __default.finished;
+const __export_getDefaultHighWaterMark = __default.getDefaultHighWaterMark;
+const __export_isDestroyed = __default.isDestroyed;
+const __export_isDisturbed = __default.isDisturbed;
+const __export_isErrored = __default.isErrored;
+const __export_isReadable = __default.isReadable;
+const __export_isWritable = __default.isWritable;
+const __export_pipeline = __default.pipeline;
+const __export_promises = __default.promises;
+const __export_setDefaultHighWaterMark = __default.setDefaultHighWaterMark;
+export { __export_Duplex as Duplex, __export_PassThrough as PassThrough, __export_Readable as Readable, __export_Stream as Stream, __export_Transform as Transform, __export_Writable as Writable, __export__isArrayBufferView as _isArrayBufferView, __export__isUint8Array as _isUint8Array, __export__uint8ArrayToBuffer as _uint8ArrayToBuffer, __export_addAbortSignal as addAbortSignal, __export_compose as compose, __export_destroy as destroy, __export_duplexPair as duplexPair, __export_eos as eos, __export_finished as finished, __export_getDefaultHighWaterMark as getDefaultHighWaterMark, __export_isDestroyed as isDestroyed, __export_isDisturbed as isDisturbed, __export_isErrored as isErrored, __export_isReadable as isReadable, __export_isWritable as isWritable, __export_pipeline as pipeline, __export_promises as promises, __export_setDefaultHighWaterMark as setDefaultHighWaterMark };

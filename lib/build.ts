@@ -8,10 +8,10 @@
 // asks this code to resolve each import and load each module; plugins answer
 // first (awaited: they may be async), then Bun's resolution and the files.
 
-import { buildClose, buildNext, buildStart, buildTranspile, cwd, readFile, stat, xxh64Hex } from "beyond:native";
+import { buildClose, buildNext, buildStart, buildTranspile, cwd, readFile, stat, writeFile, xxh64Hex } from "beyond:native";
 import { mimeOf } from "./file.ts";
-import { mkdirSync, writeFileSync } from "./node/fs.ts";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "./node/path.ts";
+import { mkdirp } from "./sys/fs.ts";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "./sys/path.ts";
 import { isBuiltin, resolveFile } from "./resolve.ts";
 
 type Loader = "js" | "jsx" | "ts" | "tsx" | "json" | "jsonc" | "toml" | "text" | "file" | "css" | "html" | "napi" | "wasm" | "object";
@@ -674,8 +674,8 @@ export async function build(config: BuildConfig): Promise<BuildOutput> {
   const success = !b.logs.some((l) => l.level === "error");
   if (success && config.outdir !== undefined) {
     for (const o of outputs) {
-      mkdirSync(dirname(o.path), { recursive: true });
-      writeFileSync(o.path, await o.bytes());
+      mkdirp(dirname(o.path));
+      writeFile(o.path, await o.bytes(), false, undefined);
     }
   }
   const result: BuildOutput = { success, outputs: success ? outputs : [], logs: b.logs };
