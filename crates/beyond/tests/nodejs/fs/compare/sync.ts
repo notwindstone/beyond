@@ -1,0 +1,206 @@
+import fs from "node:fs";
+import { t, fresh, fmt } from "./h.ts";
+const W = fresh();
+const f = W + "/a.txt";
+
+// writeFile / readFile, encodings
+t("writeFile str", () => fs.writeFileSync(f, "héllo wörld 😀"));
+t("readFile buf", () => fs.readFileSync(f));
+for (const enc of ["utf8", "utf-8", "UTF8", "latin1", "binary", "ascii", "hex", "base64", "base64url", "ucs2", "utf16le", "buffer"])
+  t("readFile " + enc, () => fs.readFileSync(f, enc as any));
+t("readFile opts enc", () => fs.readFileSync(f, { encoding: "hex" }));
+t("readFile opts flag", () => fs.readFileSync(f, { flag: "r+" }).length);
+t("readFile flag a+", () => fs.readFileSync(f, { flag: "a+", encoding: "utf8" }));
+t("readFile flag w+", () => fs.readFileSync(W + "/new1.txt", { flag: "w+", encoding: "utf8" }));
+t("readFile empty", () => fs.readFileSync(W + "/new1.txt", "utf8"));
+t("readFile empty buf", () => fs.readFileSync(W + "/new1.txt"));
+t("writeFile hex", () => fs.writeFileSync(f, "68656c6c6f", "hex"));
+t("read hex back", () => fs.readFileSync(f, "utf8"));
+t("writeFile base64", () => fs.writeFileSync(f, "aGVsbG8gd29ybGQ=", { encoding: "base64" }));
+t("read b64 back", () => fs.readFileSync(f, "utf8"));
+t("writeFile latin1", () => fs.writeFileSync(f, "éÿ", "latin1"));
+t("read latin1 back", () => fs.readFileSync(f));
+t("writeFile ucs2", () => fs.writeFileSync(f, "hi", "ucs2"));
+t("read ucs2 back", () => fs.readFileSync(f));
+t("writeFile u8", () => fs.writeFileSync(f, new Uint8Array([1, 2, 3])));
+t("writeFile u16", () => fs.writeFileSync(f, new Uint16Array([0x4142, 0x4344])));
+t("read", () => fs.readFileSync(f));
+t("writeFile dv", () => fs.writeFileSync(f, new DataView(new Uint8Array([9, 8, 7]).buffer, 1)));
+t("read", () => fs.readFileSync(f));
+t("writeFile ab", () => fs.writeFileSync(f, new Uint8Array([5, 6]).buffer));
+t("read", () => fs.readFileSync(f));
+t("writeFile lone surrogate", () => fs.writeFileSync(f, "a\ud800b"));
+t("read", () => fs.readFileSync(f));
+t("writeFile invalid utf8 read", () => { fs.writeFileSync(f, Buffer.from([0x61, 0xff, 0xe2, 0x82, 0x62])); return fs.readFileSync(f, "utf8"); });
+t("writeFile flag a", () => { fs.writeFileSync(f, "x"); fs.writeFileSync(f, "y", { flag: "a" }); return fs.readFileSync(f, "utf8"); });
+t("writeFile flag r+", () => { fs.writeFileSync(f, "abcdef"); fs.writeFileSync(f, "XY", { flag: "r+" }); return fs.readFileSync(f, "utf8"); });
+t("writeFile flag wx exists", () => fs.writeFileSync(f, "z", { flag: "wx" }));
+t("writeFile mode", () => { fs.writeFileSync(W + "/m.txt", "x", { mode: 0o600 }); return (fs.statSync(W + "/m.txt").mode & 0o777).toString(8); });
+t("writeFile mode str", () => { fs.writeFileSync(W + "/m2.txt", "x", { mode: "640" }); return (fs.statSync(W + "/m2.txt").mode & 0o777).toString(8); });
+t("writeFile flush", () => fs.writeFileSync(f, "flushed", { flush: true }));
+t("appendFile", () => { fs.appendFileSync(f, "+1"); fs.appendFileSync(f, Buffer.from("+2")); return fs.readFileSync(f, "utf8"); });
+t("appendFile new", () => { fs.appendFileSync(W + "/ap.txt", "a"); return fs.readFileSync(W + "/ap.txt", "utf8"); });
+t("appendFile enc", () => { fs.appendFileSync(W + "/ap.txt", "62", "hex"); return fs.readFileSync(W + "/ap.txt", "utf8"); });
+t("appendFile flag w", () => { fs.appendFileSync(W + "/ap.txt", "z", { flag: "w" }); return fs.readFileSync(W + "/ap.txt", "utf8"); });
+
+// Buffer and URL paths
+t("readFile Buffer path", () => fs.readFileSync(Buffer.from(f), "utf8"));
+t("readFile URL path", () => fs.readFileSync(new URL("file://" + f), "utf8"));
+t("readFile URL localhost", () => fs.readFileSync(new URL("file://localhost" + f), "utf8"));
+t("writeFile URL", () => { fs.writeFileSync(new URL("file://" + W + "/u%20x.txt"), "url"); return fs.readFileSync(W + "/u x.txt", "utf8"); });
+t("stat URL", () => fs.statSync(new URL("file://" + W)).isDirectory());
+t("exists Buffer", () => fs.existsSync(Buffer.from(W)));
+t("exists URL", () => fs.existsSync(new URL("file://" + W)));
+t("exists ab", () => fs.existsSync(new TextEncoder().encode(W).buffer));
+t("exists strobj", () => fs.existsSync(new String(W) as any));
+
+// fds
+const fd = fs.openSync(W + "/fd.txt", "w+");
+t("fd number", () => typeof fd);
+t("write buf", () => fs.writeSync(fd, Buffer.from("0123456789")));
+t("write buf off len", () => fs.writeSync(fd, Buffer.from("abcdef"), 2, 3));
+t("write buf pos", () => fs.writeSync(fd, Buffer.from("XY"), 0, 2, 0));
+t("write buf pos big", () => fs.writeSync(fd, Buffer.from("Q"), 0, 1, 5n));
+t("write str", () => fs.writeSync(fd, "str"));
+t("write str pos", () => fs.writeSync(fd, "P", 1));
+t("write str enc", () => fs.writeSync(fd, "7a7a", 3, "hex"));
+t("write str enc null pos", () => fs.writeSync(fd, "6262", null, "hex"));
+t("write empty", () => fs.writeSync(fd, Buffer.alloc(0)));
+t("write u16", () => fs.writeSync(fd, new Uint16Array([0x4141]), 0, 2));
+t("fstat size", () => fs.fstatSync(fd).size);
+t("fstat bigint", () => typeof fs.fstatSync(fd, { bigint: true }).size);
+t("readFile fd", () => fs.readFileSync(fd, "utf8"));
+const b = Buffer.alloc(8);
+t("read pos 0", () => [fs.readSync(fd, b, 0, 8, 0), b.toString()]);
+t("read pos big", () => [fs.readSync(fd, b, 0, 4, 2n), b.toString()]);
+t("read off", () => [fs.readSync(fd, b, 4, 4, 0), b.toString()]);
+t("read opts", () => [fs.readSync(fd, b, { position: 1, length: 3 }), b.toString()]);
+t("read no pos (eof)", () => fs.readSync(fd, b, 0, 8, null));
+t("read dataview", () => { const dv = new DataView(new ArrayBuffer(4)); return [fs.readSync(fd, dv, 0, 4, 0), dv.getUint8(0)]; });
+t("read u16", () => { const u = new Uint16Array(2); return [fs.readSync(fd, u, 0, 4, 0), u[0]]; });
+t("read len 0", () => fs.readSync(fd, b, 0, 0, 0));
+t("readv", () => { const a = Buffer.alloc(3), c = Buffer.alloc(4); return [fs.readvSync(fd, [a, c], 0), a.toString(), c.toString()]; });
+t("writev", () => fs.writevSync(fd, [Buffer.from("w1"), new Uint8Array([0x77, 0x32])], 0));
+t("writev nopos", () => fs.writevSync(fd, [Buffer.from("end")]));
+t("readFile after", () => fs.readFileSync(W + "/fd.txt", "utf8"));
+t("ftruncate", () => { fs.ftruncateSync(fd, 4); return fs.readFileSync(W + "/fd.txt", "utf8"); });
+t("ftruncate 0", () => { fs.ftruncateSync(fd); return fs.fstatSync(fd).size; });
+t("fsync", () => fs.fsyncSync(fd));
+t("fdatasync", () => fs.fdatasyncSync(fd));
+t("fchmod", () => { fs.fchmodSync(fd, 0o640); return (fs.fstatSync(fd).mode & 0o777).toString(8); });
+t("fchmod str", () => { fs.fchmodSync(fd, "600"); return (fs.fstatSync(fd).mode & 0o777).toString(8); });
+t("fchown", () => fs.fchownSync(fd, fs.statSync(W).uid, fs.statSync(W).gid));
+t("futimes", () => { fs.futimesSync(fd, 1000, new Date(2000000)); const s = fs.fstatSync(fd); return [s.atimeMs, s.mtimeMs]; });
+t("futimes str", () => { fs.futimesSync(fd, "1500.5", 2500.25); const s = fs.fstatSync(fd); return [s.atimeMs, s.mtimeMs]; });
+t("writeFile fd", () => { fs.writeFileSync(fd, "via fd"); return fs.readFileSync(W + "/fd.txt", "utf8"); });
+t("appendFile fd", () => { fs.appendFileSync(fd, "+app"); return fs.readFileSync(W + "/fd.txt", "utf8"); });
+t("truncate fd", () => { fs.truncateSync(fd, 3); return fs.readFileSync(W + "/fd.txt", "utf8"); });
+t("close", () => fs.closeSync(fd));
+t("close again", () => fs.closeSync(fd));
+
+// open flags and modes
+for (const fl of ["r", "r+", "rs+", "w", "wx", "w+", "wx+", "a", "ax", "a+", "ax+", "as", "as+", 0, fs.constants.O_RDWR | fs.constants.O_CREAT]) {
+  t("open " + fl, () => { const d = fs.openSync(W + "/flags.txt", fl as any, 0o644); fs.closeSync(d); return true; });
+}
+t("open mode str", () => { const d = fs.openSync(W + "/om.txt", "w", "600"); fs.closeSync(d); return (fs.statSync(W + "/om.txt").mode & 0o777).toString(8); });
+t("open default", () => { const d = fs.openSync(W + "/om.txt"); fs.closeSync(d); return true; });
+
+// stat family
+fs.writeFileSync(W + "/s.txt", "12345");
+t("stat", () => { const s = fs.statSync(W + "/s.txt"); return [s.size, s.isFile(), s.isDirectory(), s.isSymbolicLink(), s.isFIFO(), s.isSocket(), s.isBlockDevice(), s.isCharacterDevice(), s.nlink, typeof s.ino, typeof s.atimeMs, s.blksize > 0]; });
+t("stat bigint", () => { const s = fs.statSync(W + "/s.txt", { bigint: true }); return [s.size, s.isFile(), typeof s.atimeNs, typeof s.mtimeMs, s.mtimeMs === s.mtimeNs / 1000000n, s.mtime.getTime() === Number(s.mtimeMs)]; });
+t("stat missing noThrow", () => fs.statSync(W + "/missing", { throwIfNoEntry: false }));
+t("lstat missing noThrow", () => fs.lstatSync(W + "/missing", { throwIfNoEntry: false }));
+t("stat ENOTDIR noThrow", () => fs.statSync(W + "/s.txt/x", { throwIfNoEntry: false }));
+t("stat dev char", () => fs.statSync("/dev/null").isCharacterDevice());
+t("stat dates", () => { const s = fs.statSync(W + "/s.txt"); return [s.mtime.getTime() === Math.trunc(s.mtimeMs) || s.mtime.getTime() === Math.floor(s.mtimeMs), s.birthtime instanceof Date]; });
+t("lstat", () => fs.lstatSync(W + "/s.txt").isFile());
+t("statfs", () => { const s = fs.statfsSync(W); return [typeof s.type, s.bsize > 0, Object.keys(s).join()]; });
+t("statfs bigint", () => typeof fs.statfsSync(W, { bigint: true }).blocks);
+
+// links
+t("symlink", () => fs.symlinkSync("s.txt", W + "/ln"));
+t("symlink type", () => fs.symlinkSync("s.txt", W + "/ln2", "file"));
+t("lstat link", () => fs.lstatSync(W + "/ln").isSymbolicLink());
+t("stat link", () => fs.statSync(W + "/ln").isFile());
+t("readlink", () => fs.readlinkSync(W + "/ln"));
+t("readlink buffer", () => fs.readlinkSync(W + "/ln", "buffer"));
+t("readlink hex", () => fs.readlinkSync(W + "/ln", { encoding: "hex" }));
+t("realpath", () => fs.realpathSync(W + "/ln"));
+t("realpath native", () => fs.realpathSync.native(W + "/ln"));
+t("realpath buffer", () => fs.realpathSync(W + "/ln", "buffer"));
+t("realpath dots", () => fs.realpathSync(W + "/./x/../s.txt"));
+t("link", () => { fs.linkSync(W + "/s.txt", W + "/hard"); return fs.statSync(W + "/s.txt").nlink; });
+t("lchown", () => fs.lchownSync(W + "/ln", fs.statSync(W).uid, fs.statSync(W).gid));
+t("lutimes", () => { fs.lutimesSync(W + "/ln", 5, 6); return fs.lstatSync(W + "/ln").mtimeMs; });
+t("utimes", () => { fs.utimesSync(W + "/s.txt", 7, 8); return fs.statSync(W + "/s.txt").mtimeMs; });
+t("utimes now", () => { fs.utimesSync(W + "/s.txt", -1, -1); return fs.statSync(W + "/s.txt").mtimeMs > 1e12; });
+t("chmod", () => { fs.chmodSync(W + "/s.txt", 0o604); return (fs.statSync(W + "/s.txt").mode & 0o777).toString(8); });
+t("chmod str", () => { fs.chmodSync(W + "/s.txt", "644"); return (fs.statSync(W + "/s.txt").mode & 0o777).toString(8); });
+t("chown", () => fs.chownSync(W + "/s.txt", -1, -1));
+t("access", () => fs.accessSync(W + "/s.txt"));
+t("access R_OK|W_OK", () => fs.accessSync(W + "/s.txt", fs.constants.R_OK | fs.constants.W_OK));
+t("access X_OK", () => fs.accessSync(W + "/s.txt", fs.constants.X_OK));
+t("truncate", () => { fs.truncateSync(W + "/s.txt", 2); return fs.readFileSync(W + "/s.txt", "utf8"); });
+t("truncate default", () => { fs.truncateSync(W + "/s.txt"); return fs.statSync(W + "/s.txt").size; });
+t("truncate grow", () => { fs.truncateSync(W + "/s.txt", 3); return fs.readFileSync(W + "/s.txt"); });
+t("rename", () => { fs.renameSync(W + "/hard", W + "/hard2"); return [fs.existsSync(W + "/hard"), fs.existsSync(W + "/hard2")]; });
+t("unlink", () => { fs.unlinkSync(W + "/hard2"); return fs.existsSync(W + "/hard2"); });
+t("copyFile", () => { fs.writeFileSync(W + "/c1", "copy me"); fs.copyFileSync(W + "/c1", W + "/c2"); return fs.readFileSync(W + "/c2", "utf8"); });
+t("copyFile excl", () => fs.copyFileSync(W + "/c1", W + "/c2", fs.constants.COPYFILE_EXCL));
+t("copyFile over", () => { fs.writeFileSync(W + "/c1", "new"); fs.copyFileSync(W + "/c1", W + "/c2"); return fs.readFileSync(W + "/c2", "utf8"); });
+t("copyFile mode", () => { fs.chmodSync(W + "/c1", 0o600); fs.copyFileSync(W + "/c1", W + "/c3"); return (fs.statSync(W + "/c3").mode & 0o777).toString(8); });
+t("copyFile ficlone", () => { fs.copyFileSync(W + "/c1", W + "/c4", fs.constants.COPYFILE_FICLONE); return fs.readFileSync(W + "/c4", "utf8"); });
+
+// directories
+t("mkdir", () => fs.mkdirSync(W + "/d1"));
+t("mkdir exists", () => fs.mkdirSync(W + "/d1"));
+t("mkdir rec", () => fs.mkdirSync(W + "/d2/a/b", { recursive: true }));
+t("mkdir rec exists", () => fs.mkdirSync(W + "/d2/a/b", { recursive: true }));
+t("mkdir rec partial", () => fs.mkdirSync(W + "/d2/a/c/d", { recursive: true }));
+t("mkdir rec file", () => fs.mkdirSync(W + "/s.txt/x", { recursive: true }));
+t("mkdir rec on file", () => fs.mkdirSync(W + "/s.txt", { recursive: true }));
+t("mkdir mode", () => { fs.mkdirSync(W + "/d3", 0o700); return (fs.statSync(W + "/d3").mode & 0o777).toString(8); });
+t("mkdir mode opt", () => { fs.mkdirSync(W + "/d4", { mode: "711" }); return (fs.statSync(W + "/d4").mode & 0o777).toString(8); });
+t("mkdir rel rec", () => { const cwd = process.cwd(); process.chdir(W); try { return fs.mkdirSync("rel/x/y", { recursive: true }); } finally { process.chdir(cwd); } });
+t("mkdtemp", () => { const p = fs.mkdtempSync(W + "/tmp-"); return [p.length - (W + "/tmp-").length, fs.statSync(p).isDirectory()]; });
+t("mkdtemp buffer", () => Buffer.isBuffer(fs.mkdtempSync(W + "/tb-", "buffer")));
+t("mkdtemp opts", () => typeof fs.mkdtempSync(Buffer.from(W + "/tc-"), { encoding: "latin1" }));
+fs.writeFileSync(W + "/d2/f1", "1");
+fs.writeFileSync(W + "/d2/a/f2", "2");
+fs.symlinkSync("f1", W + "/d2/lnk");
+t("readdir", () => fs.readdirSync(W + "/d2").sort());
+t("readdir buffer", () => fs.readdirSync(W + "/d2", "buffer").map(String).sort());
+t("readdir hex", () => fs.readdirSync(W + "/d2", { encoding: "hex" }).sort());
+t("readdir types", () => fs.readdirSync(W + "/d2", { withFileTypes: true }).map((d) => [d.name, d.path, d.parentPath, d.isFile(), d.isDirectory(), d.isSymbolicLink()]).sort());
+t("readdir types buffer", () => fs.readdirSync(W + "/d2", { withFileTypes: true, encoding: "buffer" }).map(String).sort());
+t("readdir rec", () => fs.readdirSync(W + "/d2", { recursive: true }).sort());
+t("readdir rec types", () => fs.readdirSync(W + "/d2", { recursive: true, withFileTypes: true }).map((d) => [d.name, d.parentPath, d.isDirectory()]).sort());
+t("readdir rec trailing slash", () => fs.readdirSync(W + "/d2/", { recursive: true, withFileTypes: true }).map((d) => d.parentPath).sort());
+t("readdir rec buffer", () => fs.readdirSync(W + "/d2", { recursive: true, encoding: "buffer" }).map(String).sort());
+t("readdir Buffer path", () => fs.readdirSync(Buffer.from(W + "/d2")).sort());
+t("readdir rel types", () => { const cwd = process.cwd(); process.chdir(W); try { return fs.readdirSync("./d2/a", { withFileTypes: true }).map((d) => [d.name, d.path]).sort(); } finally { process.chdir(cwd); } });
+t("readdir rel rec types", () => { const cwd = process.cwd(); process.chdir(W); try { return fs.readdirSync("./d2", { withFileTypes: true, recursive: true }).map((d) => [d.name, d.path]).sort(); } finally { process.chdir(cwd); } });
+t("opendir", () => { const d = fs.opendirSync(W + "/d2"); const names = []; let e; while ((e = d.readSync())) names.push(e.name); d.closeSync(); return names.sort(); });
+t("rmdir", () => fs.rmdirSync(W + "/d1"));
+t("rmdir notempty", () => fs.rmdirSync(W + "/d2"));
+t("rmdir rec", () => { fs.mkdirSync(W + "/rr/x", { recursive: true }); fs.rmdirSync(W + "/rr", { recursive: true }); return fs.existsSync(W + "/rr"); });
+t("rm file", () => { fs.writeFileSync(W + "/rmf", ""); fs.rmSync(W + "/rmf"); return fs.existsSync(W + "/rmf"); });
+t("rm missing", () => fs.rmSync(W + "/rmf"));
+t("rm missing force", () => fs.rmSync(W + "/rmf", { force: true }));
+t("rm dir", () => fs.rmSync(W + "/d3"));
+t("rm rec", () => { fs.rmSync(W + "/d2", { recursive: true }); return fs.existsSync(W + "/d2"); });
+t("rm rec missing", () => fs.rmSync(W + "/d2", { recursive: true }));
+t("rm rec link", () => { fs.mkdirSync(W + "/rl"); fs.symlinkSync(W + "/d4", W + "/rl/l"); fs.rmSync(W + "/rl", { recursive: true }); return [fs.existsSync(W + "/rl"), fs.existsSync(W + "/d4")]; });
+
+// cp
+fs.mkdirSync(W + "/src/sub", { recursive: true });
+fs.writeFileSync(W + "/src/a", "A");
+fs.writeFileSync(W + "/src/sub/b", "B");
+t("cpSync file", () => { fs.cpSync(W + "/src/a", W + "/cpa"); return fs.readFileSync(W + "/cpa", "utf8"); });
+t("cpSync dir", () => { fs.cpSync(W + "/src", W + "/dst", { recursive: true }); return fs.readdirSync(W + "/dst", { recursive: true }).sort(); });
+t("cpSync dir norec", () => fs.cpSync(W + "/src", W + "/dst2"));
+t("cpSync exist", () => fs.cpSync(W + "/src/a", W + "/cpa", { errorOnExist: true, force: false }));
+t("cpSync filter", () => { fs.cpSync(W + "/src", W + "/dst3", { recursive: true, filter: (s: string) => !s.endsWith("/b") }); return fs.readdirSync(W + "/dst3", { recursive: true }).sort(); });
+t("existsSync", () => [fs.existsSync(W), fs.existsSync(W + "/nope"), fs.existsSync(""), fs.existsSync(5 as any), fs.existsSync(undefined as any), fs.existsSync("a\0b")]);
+console.log("done", fmt(null));
