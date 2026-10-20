@@ -1,7 +1,3 @@
-// Natives of Bun's jest that Beyond does not have yet: each throws
-// when used.
+// Bun's test runner natives that node:test uses (lib/jest.ts's).
 
-import { $nativeStub } from "node:internal/intrinsics";
-
-export const jsFileGeneration: any = $nativeStub("jest", "jsFileGeneration");
-export const jsNodeTestMarkResult: any = $nativeStub("jest", "jsNodeTestMarkResult");
+export { fileGeneration as jsFileGeneration, markResult as jsNodeTestMarkResult } from "../../../jest.ts";

@@ -14,6 +14,9 @@ import { isBuiltin, resolveFile } from "./resolve.ts";
 /** Beyond's lib/ (this module's directory). */
 export const LIB: string = import.meta.dirname;
 
+/** Bun's modules Beyond has, by their files in lib/. */
+const BUN_MODULES: Record<string, string> = { "bun:test": "jest.ts" };
+
 function registry(): Map<string, () => object> | undefined {
   return (globalThis as any)[Symbol.for("luminous.modules")];
 }
@@ -91,7 +94,15 @@ function load(name: string): { code?: string; exports?: object; meta?: object } 
     const f = JSON.stringify(file);
     return { code: `export * from ${f}; export { default } from ${f};\n` };
   }
-  if (name.startsWith("bun:") || name === "bun") throw new Error(`Beyond does not have the module "${name}" yet`);
+  if (name.startsWith("bun:") || name === "bun") {
+    const own = BUN_MODULES[name];
+    if (own === undefined) throw new Error(`Beyond does not have the module "${name}" yet`);
+    const file = `${LIB}/${own}`;
+    const shared = registry()?.get(file);
+    if (shared !== undefined) return { exports: shared() };
+    const f = JSON.stringify(file);
+    return { code: `export * from ${f}; export { default } from ${f};\n` };
+  }
   if (name.endsWith(".json")) return { exports: { default: JSON.parse(readFile(name, true) as string) } };
   let code = readFile(name, true) as string;
   if (/\.[cm]?tsx?$|\.jsx$/.test(name)) code = transpile(name, code);
@@ -138,6 +149,10 @@ export function libModuleSync(file: string): any {
 /** A built-in module's namespace (its default export if it has one), now:
  * process.getBuiltinModule. */
 export function builtinModule(name: string): unknown {
+  if (name in BUN_MODULES) {
+    const ns: any = importModuleSync(`${LIB}/${BUN_MODULES[name]}`);
+    return ns?.default ?? ns;
+  }
   if (!isBuiltin(name) || name.startsWith("bun:")) return undefined;
   // (One Beyond does not have yet: none, as an unknown one.)
   if (builtinFile(name.startsWith("node:") ? name.slice(5) : name) === undefined) return undefined;

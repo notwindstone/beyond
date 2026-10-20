@@ -92,6 +92,9 @@ const NODE_MODULES: &[&str] = &[
     "trace_events", "tty", "url", "util", "util/types", "v8", "vm", "wasi", "worker_threads", "zlib",
 ];
 
+/// Bun's modules Beyond has (`bun:test`), in lib/.
+const BUN_MODULES: &[(&str, &str)] = &[("bun:test", "beyond:jest")];
+
 /// What Beyond adds to a program.
 fn embed(opts: &mut BuildOpts) -> Result<()> {
     let lib = root().join("lib");
@@ -108,6 +111,9 @@ fn embed(opts: &mut BuildOpts) -> Result<()> {
     e.module_dirs.push(("node:".into(), lib.join("node")));
     for name in NODE_MODULES {
         e.aliases.push((name.to_string(), format!("node:{name}")));
+    }
+    for (name, module) in BUN_MODULES {
+        e.aliases.push((name.to_string(), module.to_string()));
     }
     // (Modules loaded at run time, Beyond.build's among them, import the
     // program's instances of lib/'s.)

@@ -198,6 +198,10 @@ const runtime = {
   get main(): string {
     return process.argv[1] ?? "";
   },
+  /** Bun.jest(path): bun:test's functions (lib/jest.ts, loaded when first used). */
+  jest(path?: string): any {
+    return import.meta.require("./jest.ts").jestFor(path);
+  },
 };
 define("Beyond", runtime);
 // Code written for Bun runs as it is: `Bun` is `Beyond`.

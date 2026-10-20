@@ -83,6 +83,7 @@ export function builtins(): unknown[] {
     import.meta.require("node:worker_threads"),
     import.meta.require("node:zlib"),
     import.meta.require("node:zlib/iter"),
+    import.meta.require("bun:test"),
   ];
 }
 
@@ -96,3 +97,5 @@ const file = resolve(arg);
 process.argv.splice(1, 2, file);
 if (file.endsWith(".mjs")) await import(pathToFileURL(file).href);
 else createRequire(file)(file);
+// (The tests the file registered with bun:test or node:test.)
+(globalThis as any)[Symbol.for("beyond.test.run")]?.();
