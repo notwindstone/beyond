@@ -50,6 +50,7 @@ fn main() {
         "native/system.c",
         "native/node.c",
         "native/fs.c",
+        "native/os.c",
         "native/spawn.c",
         "native/buffer.c",
     ] {

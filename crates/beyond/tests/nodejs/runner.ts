@@ -1,11 +1,13 @@
 // The runner of Node.js's tests (Bun's copy of them: test/js/node/test in
 // Bun's repository; run.py runs each). Every built-in module is part of
 // it, compiled, and evaluated when a test first requires it (the function
-// below only names them); the test, a CommonJS script, is loaded at run
-// time: `runner <test.js> [args...]`.
+// below only names them); the test is loaded at run time, a CommonJS
+// script required, an ES module (`.mjs`) imported: `runner <test.js>
+// [args...]`.
 
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 /** (Never called: the modules it names are the runner's.) */
 export function builtins(): unknown[] {
@@ -92,4 +94,5 @@ if (arg === undefined) {
 const file = resolve(arg);
 // As `node <test.js>` has them: the test's path second.
 process.argv.splice(1, 2, file);
-createRequire(file)(file);
+if (file.endsWith(".mjs")) await import(pathToFileURL(file).href);
+else createRequire(file)(file);
