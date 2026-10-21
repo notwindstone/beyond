@@ -14,10 +14,12 @@ const W = fresh();
   queueMicrotask(() => log.push("microtask"));
   log.push("sync");
   await new Promise((r) => setTimeout(r, 30));
-  // (Bun's completions come in the order its thread pool finishes them.)
+  // (Bun's completions come in the order its thread pool finishes them,
+  // before or after a timer of 1 ms as they finish: only that they come
+  // after the synchronous code and the microtasks is certain.)
   const fsEvents = log.filter((x) => x.startsWith("cb-") || x === "promise-stat");
   const rest = log.filter((x) => !fsEvents.includes(x));
-  console.log("order:", rest.slice(0, 3).join(" "), "| fs:", fsEvents.sort().join(" "), "| first fs at", log.findIndex((x) => fsEvents.includes(x)), "| last:", log[log.length - 1]);
+  console.log("order:", rest.join(" "), "| fs:", fsEvents.sort().join(" "), "| first fs at least", log.findIndex((x) => fsEvents.includes(x)) >= 3);
 }
 {
   // a callback's microtasks run before the next completion
@@ -25,7 +27,8 @@ const W = fresh();
   fs.stat(W, () => { log.push("cb1"); Promise.resolve().then(() => log.push("cb1-micro")); });
   fs.stat(W, () => log.push("cb2"));
   await new Promise((r) => setTimeout(r, 30));
-  console.log("order2:", log.join(" "));
+  // (In whichever order the two complete.)
+  console.log("order2:", [...log].sort().join(" "), "| micro right after its callback:", log.indexOf("cb1-micro") === log.indexOf("cb1") + 1);
 }
 {
   // callback arguments
