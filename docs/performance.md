@@ -328,6 +328,90 @@ now compiles the parser's character scans as integer compares (a scan of
 fast path covers credentials, dot segments and escapes, keeps a canonical
 input as the URL's serialization and its path as one string, and makes no
 string for the scheme.
+## `node:fs`
+
+`crates/beyond/tests/nodejs/fs/bench` (its README says what each case
+does): the synchronous calls (`bench.ts`), the callback and promise forms
+with many calls in flight (`async.ts`), streams, recursive `readdir`, and
+`cp` and `rm` of a tree of 2,000 files (`tree.ts`), and reading 1 MB
+(`big.ts`). Each case is the best of five runs inside its program; each
+line is the best of five runs of `bench.ts` and of three of the others,
+Beyond (`beyond build`, LLVM), Beyond before the port was finished
+(c3c07a0, built the same way from the same programs) and Bun 1.4.3
+alternated:
+
+| | before | after | Bun | after / Bun |
+|---|---|---|---|---|
+| readFileSync small utf8 (ns/op) | 1,679 | 1,551 | 1,901 | 0.82 |
+| readFileSync small buffer (ns/op) | 1,799 | 1,751 | 1,831 | 0.96 |
+| readFileSync 1MB utf8 (ns/op) | 564,565 | 148,455 | 218,610 | 0.68 |
+| readFileSync 1MB buffer (ns/op) | 112,762 | 122,777 | 182,836 | 0.67 |
+| statSync (ns/op) | 765 | 702 | 878 | 0.80 |
+| statSync + isFile (ns/op) | 866 | 727 | 914 | 0.80 |
+| lstatSync throwIfNoEntry:false miss (ns/op) | 617 | 548 | 807 | 0.68 |
+| existsSync hit (ns/op) | 596 | 497 | 559 | 0.89 |
+| existsSync miss (ns/op) | 575 | 482 | 594 | 0.81 |
+| writeFileSync small string (ns/op) | 2,908 | 2,842 | 3,069 | 0.93 |
+| writeFileSync 1MB buffer (ns/op) | 52,848 | 50,874 | 50,822 | 1.00 |
+| readdirSync 100 (ns/op) | 19,922 | 17,831 | 21,464 | 0.83 |
+| readdirSync 100 withFileTypes (ns/op) | 21,974 | 19,390 | 22,625 | 0.86 |
+| open/read/close (ns/op) | 2,263 | 1,479 | 1,631 | 0.91 |
+| writeSync string (ns/op) | 580 | 424 | 507 | 0.84 |
+| writeSync buffer (ns/op) | 629 | 447 | 481 | 0.93 |
+| readFile small utf8 (callback) (ns/op) | 2,888 | 1,837 | 2,373 | 0.77 |
+| readFile small utf8 (promise) (ns/op) | 2,822 | 1,774 | 2,720 | 0.65 |
+| writeFile small (callback) (ns/op) | 4,836 | 2,284 | 2,892 | 0.79 |
+| writeFile small (promise) (ns/op) | 4,703 | 2,160 | 3,252 | 0.66 |
+| stat (callback) (ns/op) | 2,035 | 1,156 | 1,435 | 0.81 |
+| stat (promise) (ns/op) | 1,556 | 896 | 1,403 | 0.64 |
+| readdir 100 (callback) (ns/op) | 21,768 | 9,563 | 14,193 | 0.67 |
+| readdir 100 (promise) (ns/op) | 21,373 | 9,097 | 14,252 | 0.64 |
+| readdir 100 withFileTypes (promise) (ns/op) | 23,429 | 9,730 | 17,272 | 0.56 |
+| FileHandle.read 4KB (ns/op) | 2,697 | 1,099 | 1,336 | 0.82 |
+| FileHandle.write 4KB (ns/op) | 4,537 | 2,135 | 2,545 | 0.84 |
+| createReadStream 1 MB (us) | 315 | 460 | 1,556 | 0.30 |
+| createWriteStream 1 MB (us) | 503 | 463 | 1,578 | 0.29 |
+| createReadStream 10 MB (us) | 2,099 | 4,975 | 8,794 | 0.57 |
+| createWriteStream 10 MB (us) | 3,988 | 4,760 | 9,046 | 0.53 |
+| createReadStream 100 MB (us) | 27,413 | 47,190 | 80,035 | 0.59 |
+| createWriteStream 100 MB (us) | 38,429 | 47,849 | 84,414 | 0.57 |
+| readdirSync recursive (2,110 entries) (us) | 663 | 568 | 767 | 0.74 |
+| readdir recursive (promise) (us) | 695 | 386 | 479 | 0.81 |
+| readdirSync recursive withFileTypes (us) | 870 | 652 | 1,009 | 0.65 |
+| cpSync + rmSync tree (us) | 73,153 | 341,875 | 709,980 | 0.48 |
+| cp + rm tree (promise) (us) | 102,427 | 711,044 | 1,547,482 | 0.46 |
+| readFileSync 1 MB utf8 (us) | 640 | 209 | 253 | 0.83 |
+| readFileSync 1 MB latin1 (us) | 622 | 173 | 213 | 0.81 |
+| readFileSync 1 MB buffer (us) | 177 | 181 | 228 | 0.79 |
+
+- Every line is Bun's time or less but one: writing 1 MB with
+  `writeFileSync` makes the system calls Bun's does (open, one `write`,
+  `ftruncate`, close), around which Beyond spends 0.1 µs less (1.3 µs
+  against 1.4 to 1.5 µs writing to `/dev/null`), and its time is the
+  kernel's: a C program making those calls takes as long. It comes out
+  0.89 to 1.04 of Bun's from one run to the next.
+- The callback and promise forms ran synchronously on the JavaScript
+  thread before; they now run on a pool of C threads that wake as Bun's
+  work pool's do (one thread woken at a time, which wakes the next once
+  it has a job; a burst of jobs wakes several at once), and settle from
+  the event loop. A stream reads or writes a chunk a call, one call after
+  another, and a thread asleep takes this VM 30 to 160 µs to wake: a
+  thread out of work spins 50 µs before it sleeps, and a stream is still
+  slower than when it ran on the JavaScript thread, as Bun's are.
+- `fsp.cp` of a directory is Node's walker on Linux, in Bun as here (its
+  native copy is macOS's `clonefile`): a few awaited calls a file, each
+  a job of the pool now. `cp` and `rm` of a tree also move with the
+  filesystem's state (the copy took 120 ms in a fresh run and 700 to
+  950 ms after a few minutes of them, Bun's and Beyond's alike).
+- What made the rest faster: `readdir` through `getdents64`, its array
+  made at once, and a recursive one that reads each directory as a job of
+  its own (as Bun's); `readFileSync` with `utf8` or `latin1` read straight
+  into a string; a path's characters copied as they are when it is ASCII;
+  the usual `read` and `write` calls checked natively, and the callback
+  wrapper (`guardCallback`) native; the asynchronous forms compiled
+  natively without an array of their arguments; and Luminous's caches
+  for `this[kFd]` (symbol keys) and a Buffer's `byteLength` (a getter
+  three prototypes up).
 ## Streams
 
 Streaming a large body is slower than Bun's for now: 256 MB in 64 KB chunks

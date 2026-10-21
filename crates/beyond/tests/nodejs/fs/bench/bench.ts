@@ -32,7 +32,7 @@ bench("lstatSync throwIfNoEntry:false miss", 200000, () => { sink = fs.lstatSync
 bench("existsSync hit", 200000, () => { sink = fs.existsSync(small); });
 bench("existsSync miss", 200000, () => { sink = fs.existsSync(dir + "/nope"); });
 bench("writeFileSync small string", 20000, () => { fs.writeFileSync(dir + "/out.txt", "hello world\n"); });
-bench("writeFileSync 1MB buffer", 200, () => { fs.writeFileSync(dir + "/out.bin", big); });
+bench("writeFileSync 1MB buffer", 1000, () => { fs.writeFileSync(dir + "/out.bin", big); });
 bench("readdirSync 100", 20000, () => { sink = fs.readdirSync(dir + "/many"); });
 bench("readdirSync 100 withFileTypes", 20000, () => { sink = fs.readdirSync(dir + "/many", { withFileTypes: true }); });
 const buf = Buffer.alloc(4096);
