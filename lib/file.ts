@@ -63,21 +63,26 @@ function pathOf(p: string | URL): string {
 
 /** Bun.file(path): a Blob whose bytes are the file's, read when asked. */
 export class BunFile extends Blob {
-  name: string;
+  #name: string;
   #path: string;
   #explicitType: string | undefined;
 
   constructor(path: string | URL, options?: { type?: string }) {
     super();
     this.#path = pathOf(path);
-    this.name = typeof path === "string" ? path : this.#path;
+    this.#name = typeof path === "string" ? path : this.#path;
     this.#explicitType = options?.type;
     // (What reads a Blob's bytes reads the file.)
     Object.defineProperty(this, "_bytes", {
       get: () => new Uint8Array(readFile(this.#path, false) as ArrayBuffer),
       set: () => {},
+      enumerable: false,
       configurable: true,
     });
+  }
+
+  get name(): string {
+    return this.#name;
   }
 
   override get size(): number {

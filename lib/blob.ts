@@ -55,9 +55,15 @@ function bytesOf(part: BlobPart, native: boolean): Uint8Array {
   return encodeUtf8(s);
 }
 
+/** Defines `obj`'s internal property `key`: not enumerable, as a Blob's
+ * internals are not properties of Bun's (`Object.keys(blob)` is empty). */
+export function hide(obj: object, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, { value, writable: true, configurable: true });
+}
+
 export class Blob {
-  _bytes: Uint8Array;
-  _type: string;
+  declare _bytes: Uint8Array;
+  declare _type: string;
 
   constructor(parts?: Iterable<BlobPart>, options?: BlobPropertyBag) {
     if (parts !== undefined && parts !== null && (typeof parts !== "object" || typeof (parts as any)[Symbol.iterator] !== "function")) {
@@ -73,18 +79,19 @@ export class Blob {
         size += b.length;
       }
     }
+    let bytes: Uint8Array;
     if (chunks.length === 1) {
-      this._bytes = chunks[0];
+      bytes = chunks[0];
     } else {
-      const all = new Uint8Array(size);
+      bytes = new Uint8Array(size);
       let at = 0;
       for (const c of chunks) {
-        all.set(c, at);
+        bytes.set(c, at);
         at += c.length;
       }
-      this._bytes = all;
     }
-    this._type = normalizeType(options?.type);
+    hide(this, "_bytes", bytes);
+    hide(this, "_type", normalizeType(options?.type));
   }
 
   /** A Blob over `bytes` (not copied). */
@@ -155,15 +162,16 @@ export interface FilePropertyBag extends BlobPropertyBag {
 }
 
 export class File extends Blob {
-  _name: string;
-  _lastModified: number;
+  declare _name: string;
+  declare _lastModified: number;
   // (Printed, unless the File was made from a Blob by FormData, as Bun's.)
-  _showModified = true;
+  declare _showModified: boolean;
 
   constructor(parts: Iterable<BlobPart>, name: string, options?: FilePropertyBag) {
     super(parts, options);
-    this._name = String(name);
-    this._lastModified = options?.lastModified !== undefined ? Number(options.lastModified) : Date.now();
+    hide(this, "_name", String(name));
+    hide(this, "_lastModified", options?.lastModified !== undefined ? Number(options.lastModified) : Date.now());
+    hide(this, "_showModified", true);
   }
 
   get name(): string {
