@@ -153,8 +153,16 @@ throws `ERR_NOT_IMPLEMENTED` when called. Ported natively so far:
 Bun's names and errors: `fs.watch` on inotify, `watchFile`, `Dir` and
 `opendir`, `cp`, `glob`, `statfs`, `openAsBlob`, streams, `FileHandle`'s
 `readLines`, `readableWebStream` and streams; the callback and promise
-forms run their system calls on a pool of C threads and settle from the
-event loop, as Bun's work pool does), `node:os`,
+forms run their system calls on a pool of C threads that wake as Bun's
+work pool's do, and settle from the event loop: an asynchronous recursive
+`readdir` reads each directory as a job of its own there, as Bun's; the
+compare suites of `crates/beyond/tests/nodejs/fs` (`run.sh
+compare/{sync,errors,async,classes,streams,rw}.ts` and `watch/*.ts`,
+interpreted or `native`) print Bun's output. Not yet Bun's: a `Blob`'s
+own property names (`openAsBlob`'s too) show its internal fields, and
+an engine's error message where JavaScriptCore's differs (a typed
+array's getter on another object: `not a TypedArray`, where Bun says
+`Receiver should be a typed array view`)), `node:os`,
 `Bun.spawn`/`spawnSync` (so `node:child_process`), `performance` and
 `PerformanceObserver`, `setImmediate`, `MessageChannel`/`BroadcastChannel`
 (in one thread), `util.isDeepStrictEqual`, `process.binding`.
