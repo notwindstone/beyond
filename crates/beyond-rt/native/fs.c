@@ -803,6 +803,59 @@ static JSValue js_fs_dirent_type(JSContext *c, JSValueConst this_val, int argc, 
 
 // ---- Files ----
 
+// A directory's entries, read with getdents64 into a buffer (as Bun's
+// DirIterator): readdir(3)'s fdopendir costs an fstat and two fcntl, and a
+// larger allocation, a directory.
+struct dent64 {
+    uint64_t d_ino;
+    int64_t d_off;
+    unsigned short d_reclen;
+    unsigned char d_type;
+    char d_name[];
+};
+
+typedef struct {
+    int fd, pos, end;
+    char buf[8192] __attribute__((aligned(8)));
+} DirIt;
+
+// The directory's entries (the fd is the DirIt's), or NULL (ENOMEM).
+static DirIt *dir_open(int fd) {
+    DirIt *d = malloc(sizeof *d);
+    if (!d) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    d->fd = fd;
+    d->pos = d->end = 0;
+    return d;
+}
+
+// The next entry, or NULL: the end (errno 0) or an error.
+static struct dent64 *dir_read(DirIt *d) {
+    if (d->pos >= d->end) {
+        long n;
+        do
+            n = syscall(SYS_getdents64, d->fd, d->buf, sizeof d->buf);
+        while (n < 0 && errno == EINTR);
+        if (n <= 0) {
+            if (n == 0)
+                errno = 0;
+            return NULL;
+        }
+        d->pos = 0;
+        d->end = (int)n;
+    }
+    struct dent64 *e = (struct dent64 *)(d->buf + d->pos);
+    d->pos += e->d_reclen;
+    return e;
+}
+
+static void dir_close(DirIt *d) {
+    close(d->fd);
+    free(d);
+}
+
 static int open_retry(const char *path, int flags, int mode) {
     int fd;
     do
@@ -1698,7 +1751,8 @@ enum { RD_NAMES, RD_DIRENTS, RD_BUFFERS };
 
 // The lexical join of a and b (as Bun's resolve_path join: `.` and `..`
 // resolved, slashes collapsed), then its dirname, into out.
-static size_t join_dirname(const char *a, size_t al, const char *b, size_t bl, char *out, size_t cap) {
+// a joined to b, normalized (as Bun's resolve_path::join): its length, or 0.
+static size_t join_normal(const char *a, size_t al, const char *b, size_t bl, char *out, size_t cap) {
     char tmp[2 * FS_PATH_MAX + 2];
     size_t n = 0;
     if (al + 1 + bl >= sizeof tmp)
@@ -1749,7 +1803,15 @@ static size_t join_dirname(const char *a, size_t al, const char *b, size_t bl, c
         }
         s = e;
     }
+    out[o] = 0;
+    return o;
+}
+
+static size_t join_dirname(const char *a, size_t al, const char *b, size_t bl, char *out, size_t cap) {
     // (o is never 0 here: b names an entry)
+    size_t o = join_normal(a, al, b, bl, out, cap);
+    if (!o)
+        return 0;
     // dirname
     while (o > 0 && out[o - 1] != '/')
         o--;
@@ -1767,6 +1829,46 @@ typedef struct {
     size_t len;
 } QItem;
 
+// Values gathered for an array made at once (JS_NewArrayFrom: without
+// growing it, nor setting each).
+typedef struct {
+    JSValue *v;
+    uint32_t n, cap;
+} ValVec;
+
+// Adds v (taken): 0, or -1 (freed; an exception).
+static int vals_push(JSContext *c, ValVec *a, JSValue v) {
+    if (JS_IsException(v))
+        return -1;
+    if (a->n == a->cap) {
+        uint32_t cap = a->cap ? a->cap * 2 : 16;
+        JSValue *nv = js_realloc(c, a->v, cap * sizeof *nv);
+        if (!nv) {
+            JS_FreeValue(c, v);
+            return -1;
+        }
+        a->v = nv;
+        a->cap = cap;
+    }
+    a->v[a->n++] = v;
+    return 0;
+}
+
+// The array of the values (taken).
+static JSValue vals_array(JSContext *c, ValVec *a) {
+    JSValue r = JS_NewArrayFrom(c, (int)a->n, a->v);
+    js_free(c, a->v);
+    a->v = NULL;
+    return r;
+}
+
+static void vals_free(JSContext *c, ValVec *a) {
+    for (uint32_t i = 0; i < a->n; i++)
+        JS_FreeValue(c, a->v[i]);
+    js_free(c, a->v);
+    a->v = NULL;
+}
+
 // fsReaddir(path, kind, recursive, encoding): the names (strings of the
 // encoding, or Buffers), or Dirents, of the directory's entries.
 static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
@@ -1780,21 +1882,16 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
         return JS_EXCEPTION;
     }
     int recursive = JS_ToBool(c, argv[2]);
-    JSValue arr = JS_NewArray(c);
-    if (JS_IsException(arr)) {
-        free_path(c, &p);
-        return arr;
-    }
-    uint32_t count = 0;
+    ValVec arr = {0};
     JSValue dpath = JS_UNDEFINED;
     if (!recursive) {
         int fd = open_retry(p.p, O_DIRECTORY | O_RDONLY, 0);
-        DIR *d = fd < 0 ? NULL : fdopendir(fd);
+        DirIt *d = fd < 0 ? NULL : dir_open(fd);
         if (!d) {
             int no = errno;
             if (fd >= 0)
                 close(fd);
-            JS_FreeValue(c, arr);
+            vals_free(c, &arr);
             return throw_path(c, no, "scandir", &p);
         }
         if (kind == RD_DIRENTS) {
@@ -1805,13 +1902,13 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
         }
         for (;;) {
             errno = 0;
-            struct dirent *e = readdir(d);
+            struct dent64 *e = dir_read(d);
             if (!e) {
                 if (errno) {
                     int no = errno;
-                    closedir(d);
+                    dir_close(d);
                     JS_FreeValue(c, dpath);
-                    JS_FreeValue(c, arr);
+                    vals_free(c, &arr);
                     return throw_path(c, no, "scandir", &p);
                 }
                 break;
@@ -1829,7 +1926,7 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
                     int t = dirent_kind(e->d_type);
                     if (e->d_type == DT_UNKNOWN) {
                         struct stat st;
-                        if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0)
+                        if (fstatat(d->fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0)
                             t = mode_kind(st.st_mode);
                     }
                     v = new_dirent(c, name, t, dpath);
@@ -1837,19 +1934,19 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
                     v = name;
                 }
             }
-            if (JS_IsException(v) || JS_SetPropertyUint32(c, arr, count++, v) < 0) {
+            if (vals_push(c, &arr, v) < 0) {
             fail_dir:
-                closedir(d);
+                dir_close(d);
                 JS_FreeValue(c, dpath);
-                JS_FreeValue(c, arr);
+                vals_free(c, &arr);
                 free_path(c, &p);
                 return JS_EXCEPTION;
             }
         }
-        closedir(d);
+        dir_close(d);
         JS_FreeValue(c, dpath);
         free_path(c, &p);
-        return arr;
+        return vals_array(c, &arr);
     }
 
     // Recursive: breadth first, as Bun's (a queue of paths relative to
@@ -1889,19 +1986,20 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
         }
         if (first)
             root = dup(fd);
-        DIR *d = fdopendir(fd);
+        DirIt *d = dir_open(fd);
         if (!d) {
             close(fd);
             err = throw_path(c, errno, "scandir", &p);
             goto rec_done;
         }
+        int dsame = 0;
         for (;;) {
             errno = 0;
-            struct dirent *e = readdir(d);
+            struct dent64 *e = dir_read(d);
             if (!e) {
                 int no = errno;
                 if (no && (first || !(no == ENOENT || no == ENOTDIR || no == EPERM))) {
-                    closedir(d);
+                    dir_close(d);
                     err = throw_path(c, no, "scandir", &p);
                     goto rec_done;
                 }
@@ -1928,7 +2026,7 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
             int enqueue = t == 2 || t == 3;
             if (e->d_type == DT_UNKNOWN) {
                 struct stat st;
-                if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (fstatat(d->fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0) {
                     t = mode_kind(st.st_mode);
                     enqueue = t == 2 || t == 3;
                 }
@@ -1938,7 +2036,7 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
                     size_t ncap = qcap ? qcap * 2 : 16;
                     QItem *nq = js_realloc(c, q, ncap * sizeof *q);
                     if (!nq) {
-                        closedir(d);
+                        dir_close(d);
                         goto rec_oom;
                     }
                     q = nq;
@@ -1946,7 +2044,7 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
                 }
                 char *copy = js_malloc(c, namel + 1);
                 if (!copy) {
-                    closedir(d);
+                    dir_close(d);
                     goto rec_oom;
                 }
                 memcpy(copy, name, namel + 1);
@@ -1958,13 +2056,15 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
             if (kind == RD_BUFFERS) {
                 v = new_buffer(c, NULL, (const uint8_t *)name, namel);
             } else if (kind == RD_DIRENTS) {
-                size_t dl = join_dirname(p.p, p.len, name, namel, dbuf, 2 * FS_PATH_MAX + 4);
+                // (The directory's path, once a directory.)
+                size_t dl = dsame ? prevlen : join_dirname(p.p, p.len, name, namel, dbuf, 2 * FS_PATH_MAX + 4);
+                dsame = 1;
                 if (dl != prevlen || memcmp(dbuf, prev, dl) != 0) {
                     JS_FreeValue(c, dpath);
                     dpath = encode_bytes(c, (const uint8_t *)dbuf, dl, enc, NULL);
                     if (JS_IsException(dpath)) {
                         dpath = JS_UNDEFINED;
-                        closedir(d);
+                        dir_close(d);
                         err = JS_EXCEPTION;
                         goto rec_done;
                     }
@@ -1976,13 +2076,13 @@ static JSValue js_fs_readdir(JSContext *c, JSValueConst this_val, int argc, JSVa
             } else {
                 v = encode_bytes(c, (const uint8_t *)name, namel, enc, NULL);
             }
-            if (JS_IsException(v) || JS_SetPropertyUint32(c, arr, count++, v) < 0) {
-                closedir(d);
+            if (vals_push(c, &arr, v) < 0) {
+                dir_close(d);
                 err = JS_EXCEPTION;
                 goto rec_done;
             }
         }
-        closedir(d);
+        dir_close(d);
     }
     goto rec_done;
 rec_oom:
@@ -2001,10 +2101,10 @@ rec_done:
     JS_FreeValue(c, dpath);
     free_path(c, &p);
     if (JS_IsException(err)) {
-        JS_FreeValue(c, arr);
+        vals_free(c, &arr);
         return JS_EXCEPTION;
     }
-    return arr;
+    return vals_array(c, &arr);
 }
 
 // Zig's deleteTree (as Bun's zig_delete_tree): removes `name` in dirfd, a
@@ -2020,7 +2120,7 @@ static int delete_tree(int parent, const char *name, int depth) {
     int fd = openat(parent, name, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return errno == ENOTDIR ? no : errno;
-    DIR *d = fdopendir(fd);
+    DirIt *d = dir_open(fd);
     if (!d) {
         no = errno;
         close(fd);
@@ -2029,11 +2129,11 @@ static int delete_tree(int parent, const char *name, int depth) {
     for (int attempt = 0; attempt < 2; attempt++) {
         for (;;) {
             errno = 0;
-            struct dirent *e = readdir(d);
+            struct dent64 *e = dir_read(d);
             if (!e) {
                 if (errno) {
                     no = errno;
-                    closedir(d);
+                    dir_close(d);
                     return no;
                 }
                 break;
@@ -2042,18 +2142,18 @@ static int delete_tree(int parent, const char *name, int depth) {
             if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0)))
                 continue;
             if (e->d_type == DT_DIR) {
-                no = delete_tree(dirfd(d), n, depth + 1);
+                no = delete_tree(d->fd, n, depth + 1);
             } else {
-                no = unlinkat(dirfd(d), n, 0) == 0 ? 0 : errno;
+                no = unlinkat(d->fd, n, 0) == 0 ? 0 : errno;
                 if (no == EISDIR || no == EPERM)
-                    no = delete_tree(dirfd(d), n, depth + 1);
+                    no = delete_tree(d->fd, n, depth + 1);
             }
             if (no && no != ENOENT) {
-                closedir(d);
+                dir_close(d);
                 return no;
             }
         }
-        closedir(d);
+        dir_close(d);
         if (unlinkat(parent, name, AT_REMOVEDIR) == 0)
             return 0;
         no = errno;
@@ -2063,7 +2163,7 @@ static int delete_tree(int parent, const char *name, int depth) {
         fd = openat(parent, name, O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (fd < 0)
             return errno;
-        d = fdopendir(fd);
+        d = dir_open(fd);
         if (!d) {
             no = errno;
             close(fd);
@@ -2445,7 +2545,7 @@ static int cp_inner(Cp *cp, size_t sl, size_t dl, int top) {
         close(fd);
         return cp_throw(cp, no, "mkdir", cp->dest);
     }
-    DIR *d = fdopendir(fd);
+    DirIt *d = dir_open(fd);
     if (!d) {
         no = errno;
         close(fd);
@@ -2453,10 +2553,10 @@ static int cp_inner(Cp *cp, size_t sl, size_t dl, int top) {
     }
     for (;;) {
         errno = 0;
-        struct dirent *e = readdir(d);
+        struct dent64 *e = dir_read(d);
         if (!e) {
             no = errno;
-            closedir(d);
+            dir_close(d);
             cp->src[sl] = 0;
             cp->dest[dl] = 0;
             return no ? cp_throw(cp, no, "readdir", cp->src) : 0;
@@ -2466,7 +2566,7 @@ static int cp_inner(Cp *cp, size_t sl, size_t dl, int top) {
             continue;
         size_t nl = strlen(n);
         if (sl + 1 + nl >= FS_PATH_MAX || dl + 1 + nl >= FS_PATH_MAX) {
-            closedir(d);
+            dir_close(d);
             cp->src[sl] = 0;
             return cp_throw(cp, ENAMETOOLONG, "copyfile", cp->src);
         }
@@ -2482,7 +2582,7 @@ static int cp_inner(Cp *cp, size_t sl, size_t dl, int top) {
         cp->src[sl] = 0;
         cp->dest[dl] = 0;
         if (r < 0) {
-            closedir(d);
+            dir_close(d);
             return -1;
         }
     }
@@ -3117,6 +3217,8 @@ struct FsJob {
     void (*run)(FsJob *);      // on a pool thread
     JSValue (*done)(JSContext *, FsJob *); // its value, on the JavaScript thread
     int kind;
+    int own_done;              // (its run hands it back itself: pool_done)
+    void *ctx;                 // (its run's own state)
     JSValue target;            // the promise, or the callback
     JSValue hold[2];           // what it reads (buffers), its error's paths' strings
     JSValue signal;            // an AbortSignal, aborted by when it is done: an AbortError
@@ -3150,6 +3252,12 @@ struct FsJob {
 static _Atomic(FsJob *) ring[RING_SIZE];
 static _Atomic size_t ring_head, ring_tail;
 static FsJob *over_head, *over_tail;
+// The jobs the pool's threads queue (an adaptive lock: held for a few
+// instructions, it spins before sleeping, and a thread asleep takes long
+// to wake).
+static pthread_mutex_t side_lock;
+static FsJob *side_head, *side_tail;
+static atomic_int side_len;
 // The jobs done, newest first: pushed by the threads, taken all at once by
 // the JavaScript thread (without a lock).
 static _Atomic(FsJob *) done_head;
@@ -3171,9 +3279,11 @@ static atomic_int js_parked;
 enum { SYNC_PENDING, SYNC_SIGNALED, SYNC_WAKING };
 static _Atomic uint32_t pool_sync;
 static uint32_t pool_max;
-// What the threads asleep wait on (Bun's Event: one token).
-enum { EV_EMPTY, EV_WAITING, EV_NOTIFIED };
-static _Atomic uint32_t pool_event;
+// What the threads asleep wait on: tokens, one a thread to wake (Bun's
+// Event holds one; a burst of jobs a thread queued wakes several at once,
+// pool_boost).
+static _Atomic uint32_t ev_tokens;
+static atomic_int ev_waiters;
 
 static inline void cpu_relax(void) {
 #if defined(__x86_64__) || defined(__i386__)
@@ -3221,6 +3331,28 @@ static FsJob *ring_take(void) {
     }
 }
 
+// The next job the pool's threads queued, or NULL.
+static FsJob *side_take(void) {
+    if (!atomic_load_explicit(&side_len, memory_order_acquire))
+        return NULL;
+    pthread_mutex_lock(&side_lock);
+    FsJob *j = side_head;
+    if (j) {
+        side_head = j->next;
+        if (!side_head)
+            side_tail = NULL;
+        atomic_fetch_sub_explicit(&side_len, 1, memory_order_relaxed);
+    }
+    pthread_mutex_unlock(&side_lock);
+    return j;
+}
+
+// The next job: the ring's, or the pool's threads'.
+static FsJob *pool_take(void) {
+    FsJob *j = ring_take();
+    return j ? j : side_take();
+}
+
 static void futex_wait(_Atomic uint32_t *w, uint32_t v) {
     syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, v, NULL, NULL, 0);
 }
@@ -3229,30 +3361,31 @@ static void futex_wake(_Atomic uint32_t *w, int n) {
     syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, n, NULL, NULL, 0);
 }
 
-// Waits for the event's token, and takes it.
+// Waits for a token, and takes it.
 static void event_wait(void) {
-    uint32_t with = EV_EMPTY;
-    uint32_t s = atomic_load_explicit(&pool_event, memory_order_relaxed);
     for (;;) {
-        if (s == EV_NOTIFIED) {
-            if (atomic_compare_exchange_weak_explicit(&pool_event, &s, with, memory_order_acquire, memory_order_relaxed))
+        uint32_t t = atomic_load_explicit(&ev_tokens, memory_order_relaxed);
+        while (t > 0)
+            if (atomic_compare_exchange_weak_explicit(&ev_tokens, &t, t - 1, memory_order_acquire, memory_order_relaxed))
                 return;
-            continue;
-        }
-        if (s != EV_WAITING &&
-            !atomic_compare_exchange_weak_explicit(&pool_event, &s, EV_WAITING, memory_order_relaxed, memory_order_relaxed))
-            continue;
-        futex_wait(&pool_event, EV_WAITING);
-        s = atomic_load_explicit(&pool_event, memory_order_relaxed);
-        // (Others may sleep still: the next token wakes one of them.)
-        with = EV_WAITING;
+        atomic_fetch_add_explicit(&ev_waiters, 1, memory_order_seq_cst);
+        if (atomic_load_explicit(&ev_tokens, memory_order_seq_cst) == 0)
+            futex_wait(&ev_tokens, 0);
+        atomic_fetch_sub_explicit(&ev_waiters, 1, memory_order_relaxed);
     }
 }
 
-// Posts the token, waking a thread that waits.
-static void event_notify(void) {
-    if (atomic_exchange_explicit(&pool_event, EV_NOTIFIED, memory_order_release) == EV_WAITING)
-        futex_wake(&pool_event, 1);
+// Posts n tokens, waking as many threads that wait.
+static void event_notify(int n) {
+    atomic_fetch_add_explicit(&ev_tokens, n, memory_order_seq_cst);
+    if (atomic_load_explicit(&ev_waiters, memory_order_seq_cst) > 0)
+        futex_wake(&ev_tokens, n);
+}
+
+// Whether a job is queued.
+static int pool_has_work(void) {
+    return atomic_load_explicit(&ring_head, memory_order_relaxed) != atomic_load_explicit(&ring_tail, memory_order_relaxed) ||
+           atomic_load_explicit(&side_len, memory_order_relaxed) > 0;
 }
 
 static void *pool_main(void *arg);
@@ -3295,7 +3428,7 @@ static void pool_notify_slow(int is_waking) {
         }
         if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_release, memory_order_relaxed)) {
             if (wake)
-                event_notify();
+                event_notify(1);
             else if (spawn)
                 pool_spawn();
             return;
@@ -3325,6 +3458,10 @@ static int pool_wait(int is_waking) {
                 n = SYNC_WITH(n, SYNC_WAKING);
             if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_acquire, memory_order_relaxed))
                 return is_waking || SYNC_STATE(s) == SYNC_SIGNALED;
+        } else if (is_idle && pool_has_work()) {
+            // (Woken without the notification, by pool_boost: a job for it.)
+            if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, s - 1, memory_order_acquire, memory_order_relaxed))
+                return 0;
         } else if (!is_idle) {
             uint32_t n = s + 1;
             if (is_waking)
@@ -3340,27 +3477,66 @@ static int pool_wait(int is_waking) {
     }
 }
 
+// Hands a job done back to the JavaScript thread (any thread).
+static void pool_done(FsJob *j) {
+    FsJob *old = atomic_load_explicit(&done_head, memory_order_relaxed);
+    do
+        j->next = old;
+    while (!atomic_compare_exchange_weak_explicit(&done_head, &old, j, memory_order_seq_cst, memory_order_relaxed));
+    if (atomic_load_explicit(&js_parked, memory_order_seq_cst) && atomic_exchange_explicit(&js_parked, 0, memory_order_relaxed)) {
+        uint64_t one = 1;
+        while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
+            ;
+    }
+}
+
+// Wakes up to n more threads asleep, at once, for a burst of jobs this
+// thread queued (instead of each waking the next once it finds one: a
+// thread takes tens of microseconds to wake).
+static void pool_boost(int n) {
+    int idle = (int)(atomic_load_explicit(&pool_sync, memory_order_relaxed) & SYNC_IDLE);
+    if (n > idle)
+        n = idle;
+    if (n > 0)
+        event_notify(n);
+}
+
+// Queues a job of the pool's own (a pool thread's).
+static void pool_push(FsJob *j) {
+    j->next = NULL;
+    pthread_mutex_lock(&side_lock);
+    if (side_tail)
+        side_tail->next = j;
+    else
+        side_head = j;
+    side_tail = j;
+    atomic_fetch_add_explicit(&side_len, 1, memory_order_relaxed);
+    pthread_mutex_unlock(&side_lock);
+    pool_notify(0);
+}
+
+static void pool_run(FsJob *j) {
+    if (j->no) {
+        pool_done(j);
+    } else if (j->own_done) {
+        j->run(j);
+    } else {
+        j->run(j);
+        pool_done(j);
+    }
+}
+
 static void *pool_main(void *arg) {
     (void)arg;
     int is_waking = 0;
     for (;;) {
         is_waking = pool_wait(is_waking);
         FsJob *j;
-        while ((j = ring_take())) {
+        while ((j = pool_take())) {
             if (is_waking)
                 pool_notify(1);
             is_waking = 0;
-            if (!j->no)
-                j->run(j);
-            FsJob *old = atomic_load_explicit(&done_head, memory_order_relaxed);
-            do
-                j->next = old;
-            while (!atomic_compare_exchange_weak_explicit(&done_head, &old, j, memory_order_seq_cst, memory_order_relaxed));
-            if (atomic_load_explicit(&js_parked, memory_order_seq_cst) && atomic_exchange_explicit(&js_parked, 0, memory_order_relaxed)) {
-                uint64_t one = 1;
-                while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
-                    ;
-            }
+            pool_run(j);
         }
     }
     return NULL;
@@ -3371,6 +3547,11 @@ static void pool_on_ready(struct us_internal_callback_t *cb);
 static int pool_start(void) {
     if (pool_poll)
         return 0;
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_ADAPTIVE_NP);
+    pthread_mutex_init(&side_lock, &ma);
+    pthread_mutexattr_destroy(&ma);
     pool_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (pool_efd < 0)
         return -1;
@@ -3430,6 +3611,7 @@ static FsJob *job_new(JSContext *c, JSValueConst kind, JSValueConst target) {
     j->dlen = 0;
     j->r = 0;
     j->done = NULL;
+    j->own_done = 0;
     return j;
 }
 
@@ -3653,7 +3835,11 @@ static void pool_on_ready(struct us_internal_callback_t *cb) {
 // microseconds for one to be done, which is then finished without the
 // loop sleeping (a thread's job of a few microseconds is done before the
 // loop would be woken for it); else the threads are told to wake the loop.
-// How many were finished.
+// Meanwhile it runs the jobs the pool's threads queued (a recursive
+// readdir's directories: never a call's, which may block), as a thread
+// that is awake (the pool's take tens of microseconds to wake), for up to
+// a millisecond. How many were finished.
+#define HELP_MAX_NS 1000000L
 int beyond_fs_before_wait(int spin_us) {
     if (inflight == 0)
         return 0;
@@ -3661,13 +3847,22 @@ int beyond_fs_before_wait(int spin_us) {
     if (!atomic_load_explicit(&done_head, memory_order_relaxed)) {
         struct timespec t0, t;
         clock_gettime(CLOCK_MONOTONIC, &t0);
+        long until = spin_us * 1000L;
         for (int i = 0;; i++) {
-            cpu_relax();
+            FsJob *sj = until < HELP_MAX_NS ? side_take() : NULL;
+            if (sj) {
+                pool_run(sj);
+                clock_gettime(CLOCK_MONOTONIC, &t);
+                long el = (t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec);
+                until = el + spin_us * 1000L;
+            } else {
+                cpu_relax();
+            }
             if (atomic_load_explicit(&done_head, memory_order_relaxed))
                 break;
-            if ((i & 63) == 63) {
+            if ((i & 63) == 63 || sj) {
                 clock_gettime(CLOCK_MONOTONIC, &t);
-                if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > spin_us * 1000L) {
+                if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > until) {
                     atomic_store_explicit(&js_parked, 1, memory_order_seq_cst);
                     if (!atomic_load_explicit(&done_head, memory_order_seq_cst))
                         return 0;
@@ -4573,12 +4768,245 @@ static int bytes_put(Bytes *o, int type, const char *n, size_t nl) {
     return 0;
 }
 
+// A recursive readdir's scan, as Bun's AsyncReaddirRecursiveTask: each
+// directory read by a job of its own on the pool (the root by the
+// readdir's), its directories queued as they are found (symbolic links
+// too: those that are not directories are left out, as entries that
+// vanish meanwhile), its entries (their paths relative to the root) a
+// chunk of the scan's, taken in the order they are done; the last one done
+// hands the readdir's job back.
+typedef struct RdChunk RdChunk;
+struct RdChunk {
+    RdChunk *next;
+    Bytes o;
+    int count;
+};
+
+typedef struct {
+    FsJob *job;
+    atomic_size_t left; // the directories queued or being read
+    atomic_int failed;  // (then no more are queued, and those that start read nothing)
+    int root_fd;
+    _Atomic(RdChunk *) chunks;
+} RdScan;
+
+static void rd_scan_dir(RdScan *s, const char *rel, size_t rl);
+
+static void run_rd_sub(FsJob *sub) {
+    rd_scan_dir(sub->ctx, sub->path, sub->plen);
+    free(sub->path);
+    free(sub);
+}
+
+static int rd_skips(int no) {
+    return no == ENOENT || no == ENOTDIR || no == EPERM;
+}
+
+// The scan's error (the first): of the root, or of a directory in it (its
+// path joined to the root's), its system call's (as Bun's: not scandir).
+static void rd_fail(RdScan *s, int no, const char *syscall, const char *rel, size_t rl) {
+    if (atomic_exchange_explicit(&s->failed, 1, memory_order_relaxed))
+        return;
+    FsJob *j = s->job;
+    j->no = no;
+    j->syscall = syscall;
+    j->err_what = JERR_PATH;
+    if (rel) {
+        char *b = malloc(2 * FS_PATH_MAX + 4);
+        size_t n = b ? join_normal(j->path, j->plen, rel, rl, b, 2 * FS_PATH_MAX + 4) : 0;
+        if (n) {
+            j->err_buf = b;
+            j->err_len = n;
+            j->err_what = JERR_OWN;
+        } else {
+            free(b);
+        }
+    }
+}
+
+static void rd_queue(RdScan *s, const char *rel, size_t rl) {
+    if (atomic_load_explicit(&s->failed, memory_order_relaxed))
+        return;
+    FsJob *sub = calloc(1, sizeof *sub);
+    char *p = malloc(rl + 1);
+    if (!sub || !p) {
+        free(sub);
+        free(p);
+        rd_fail(s, ENOMEM, "scandir", NULL, 0);
+        return;
+    }
+    memcpy(p, rel, rl);
+    p[rl] = 0;
+    sub->path = p;
+    sub->plen = rl;
+    sub->ctx = s;
+    sub->run = run_rd_sub;
+    sub->own_done = 1;
+    atomic_fetch_add_explicit(&s->left, 1, memory_order_relaxed);
+    pool_push(sub);
+}
+
+// One directory of the scan done: the last hands the job back, its
+// entries the chunks' (in the order they were done).
+static void rd_left(RdScan *s) {
+    if (atomic_fetch_sub_explicit(&s->left, 1, memory_order_acq_rel) != 1)
+        return;
+    FsJob *j = s->job;
+    if (s->root_fd >= 0)
+        close(s->root_fd);
+    RdChunk *list = atomic_exchange_explicit(&s->chunks, NULL, memory_order_acquire), *rev = NULL;
+    size_t total = 0;
+    int count = 0;
+    while (list) {
+        RdChunk *next = list->next;
+        list->next = rev;
+        rev = list;
+        total += list->o.len;
+        count += list->count;
+        list = next;
+    }
+    uint8_t *data = NULL;
+    if (!j->no && total && !(data = malloc(total))) {
+        j->no = ENOMEM;
+        j->syscall = "scandir";
+        j->err_what = JERR_PATH;
+    }
+    size_t at = 0;
+    while (rev) {
+        RdChunk *next = rev->next;
+        if (data) {
+            memcpy(data + at, rev->o.b, rev->o.len);
+            at += rev->o.len;
+        }
+        free(rev->o.b);
+        free(rev);
+        rev = next;
+    }
+    j->data = data;
+    j->dlen = data ? total : 0;
+    j->r = data ? count : 0;
+    free(s);
+    pool_done(j);
+}
+
+// Reads a directory of the scan (rel NULL: the root).
+static void rd_scan_dir(RdScan *s, const char *rel, size_t rl) {
+    if (atomic_load_explicit(&s->failed, memory_order_relaxed)) {
+        rd_left(s);
+        return;
+    }
+    FsJob *j = s->job;
+    // (The root's fd is the scan's, which the others are opened at.)
+    int fd = rel ? openat(s->root_fd, rel, O_DIRECTORY | O_RDONLY | O_CLOEXEC) : open_retry(j->path, O_DIRECTORY | O_RDONLY, 0);
+    if (fd >= 0 && !rel)
+        s->root_fd = fd;
+    DirIt *d = fd < 0 ? NULL : dir_open(fd);
+    if (!d) {
+        int no = errno;
+        if (fd >= 0 && rel)
+            close(fd);
+        if (!rel || !rd_skips(no))
+            rd_fail(s, no, "open", rel, rl);
+        rd_left(s);
+        return;
+    }
+    RdChunk *ch = malloc(sizeof *ch);
+    if (!ch) {
+        if (rel)
+            dir_close(d);
+        else
+            free(d);
+        rd_fail(s, ENOMEM, "scandir", NULL, 0);
+        rd_left(s);
+        return;
+    }
+    ch->o = (Bytes){0};
+    ch->count = 0;
+    char full[2 * FS_PATH_MAX + 4];
+    int queued = 0;
+    for (;;) {
+        errno = 0;
+        struct dent64 *e = dir_read(d);
+        if (!e) {
+            int no = errno;
+            if (no && (!rel || !rd_skips(no)))
+                rd_fail(s, no, "getdents64", rel, rl);
+            break;
+        }
+        const char *n = e->d_name;
+        if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0)))
+            continue;
+        size_t nl = strlen(n);
+        const char *name = n;
+        size_t namel = nl;
+        if (rel) {
+            if (rl + 1 + nl > 2 * FS_PATH_MAX)
+                continue;
+            memcpy(full, rel, rl);
+            full[rl] = '/';
+            memcpy(full + rl + 1, n, nl);
+            full[rl + 1 + nl] = 0;
+            name = full;
+            namel = rl + 1 + nl;
+        }
+        int t = dirent_kind(e->d_type);
+        if (e->d_type == DT_UNKNOWN) {
+            struct stat st;
+            if (fstatat(d->fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0)
+                t = mode_kind(st.st_mode);
+        }
+        if ((t == 2 || t == 3) && nl + 1 + namel <= FS_PATH_MAX) {
+            rd_queue(s, name, namel);
+            queued++;
+        }
+        if (bytes_put(&ch->o, t, name, namel) < 0) {
+            rd_fail(s, ENOMEM, "scandir", NULL, 0);
+            break;
+        }
+        ch->count++;
+    }
+    if (rel)
+        dir_close(d);
+    else
+        free(d);
+    // (The first queued woke a thread.)
+    if (queued > 1)
+        pool_boost(queued - 1);
+    if (ch->count) {
+        RdChunk *old = atomic_load_explicit(&s->chunks, memory_order_relaxed);
+        do
+            ch->next = old;
+        while (!atomic_compare_exchange_weak_explicit(&s->chunks, &old, ch, memory_order_release, memory_order_relaxed));
+    } else {
+        free(ch->o.b);
+        free(ch);
+    }
+    rd_left(s);
+}
+
+// The scan of a recursive readdir's job (its run).
+static void rd_scan_start(FsJob *j) {
+    RdScan *s = malloc(sizeof *s);
+    if (!s) {
+        errno = ENOMEM;
+        job_errno(j, "scandir", JERR_PATH);
+        pool_done(j);
+        return;
+    }
+    s->job = j;
+    atomic_init(&s->left, 1);
+    atomic_init(&s->failed, 0);
+    s->root_fd = -1;
+    atomic_init(&s->chunks, NULL);
+    rd_scan_dir(s, NULL, 0);
+}
+
 static void run_readdir(FsJob *j) {
     Bytes o = {0};
     int count = 0;
     if (!j->i1) {
         int fd = open_retry(j->path, O_DIRECTORY | O_RDONLY, 0);
-        DIR *d = fd < 0 ? NULL : fdopendir(fd);
+        DirIt *d = fd < 0 ? NULL : dir_open(fd);
         if (!d) {
             int no = errno;
             if (fd >= 0)
@@ -4589,7 +5017,7 @@ static void run_readdir(FsJob *j) {
         }
         for (;;) {
             errno = 0;
-            struct dirent *e = readdir(d);
+            struct dent64 *e = dir_read(d);
             if (!e) {
                 if (errno)
                     job_errno(j, "scandir", JERR_PATH);
@@ -4601,7 +5029,7 @@ static void run_readdir(FsJob *j) {
             int t = dirent_kind(e->d_type);
             if (j->i2 == RD_DIRENTS && e->d_type == DT_UNKNOWN) {
                 struct stat st;
-                if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0)
+                if (fstatat(d->fd, n, &st, AT_SYMLINK_NOFOLLOW) == 0)
                     t = mode_kind(st.st_mode);
             }
             if (bytes_put(&o, t, n, strlen(n)) < 0) {
@@ -4611,111 +5039,11 @@ static void run_readdir(FsJob *j) {
             }
             count++;
         }
-        closedir(d);
+        dir_close(d);
         goto out;
     }
-    // Recursive: as fsReaddir's (breadth first, symbolic links followed as
-    // directories, entries that vanish meanwhile left out).
-    {
-        Bytes q = {0}; // the directories to read: their paths relative to the root
-        size_t qh = 0;
-        int root = -1;
-        char joinbuf[2 * FS_PATH_MAX + 4];
-        for (int first = 1;; first = 0) {
-            const char *rel = NULL;
-            size_t rl = 0;
-            if (!first) {
-                if (qh >= q.len)
-                    break;
-                uint32_t l;
-                memcpy(&l, q.b + qh + 1, 4);
-                rel = (const char *)q.b + qh + 5;
-                rl = l;
-                memcpy(joinbuf, rel, rl);
-                joinbuf[rl] = 0;
-                rel = joinbuf;
-                qh += 5 + l;
-            }
-            char relbuf[2 * FS_PATH_MAX + 4];
-            if (!first) {
-                memcpy(relbuf, rel, rl + 1);
-                rel = relbuf;
-            }
-            int fd = first ? open_retry(j->path, O_DIRECTORY | O_RDONLY, 0)
-                           : openat(root, rel, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
-            if (fd < 0) {
-                if (first) {
-                    job_errno(j, "scandir", JERR_PATH);
-                    break;
-                }
-                if (errno == ENOENT || errno == ENOTDIR || errno == EPERM)
-                    continue;
-                job_errno(j, "scandir", 0);
-                break;
-            }
-            if (first)
-                root = dup(fd);
-            DIR *d = fdopendir(fd);
-            if (!d) {
-                close(fd);
-                job_errno(j, "scandir", JERR_PATH);
-                break;
-            }
-            int failed = 0;
-            for (;;) {
-                errno = 0;
-                struct dirent *e = readdir(d);
-                if (!e) {
-                    int no = errno;
-                    if (no && (first || !(no == ENOENT || no == ENOTDIR || no == EPERM))) {
-                        job_errno(j, "scandir", JERR_PATH);
-                        failed = 1;
-                    }
-                    break;
-                }
-                const char *n = e->d_name;
-                if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0)))
-                    continue;
-                size_t nl = strlen(n);
-                const char *name = n;
-                size_t namel = nl;
-                char full[2 * FS_PATH_MAX + 4];
-                if (!first) {
-                    if (rl + 1 + nl > 2 * FS_PATH_MAX)
-                        continue;
-                    memcpy(full, rel, rl);
-                    full[rl] = '/';
-                    memcpy(full + rl + 1, n, nl);
-                    full[rl + 1 + nl] = 0;
-                    name = full;
-                    namel = rl + 1 + nl;
-                }
-                int t = dirent_kind(e->d_type);
-                int enqueue = t == 2 || t == 3;
-                if (e->d_type == DT_UNKNOWN) {
-                    struct stat st;
-                    if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-                        t = mode_kind(st.st_mode);
-                        enqueue = t == 2 || t == 3;
-                    }
-                }
-                if ((enqueue && nl + 1 + namel <= FS_PATH_MAX && bytes_put(&q, 0, name, namel) < 0) ||
-                    bytes_put(&o, t, name, namel) < 0) {
-                    errno = ENOMEM;
-                    job_errno(j, "scandir", JERR_PATH);
-                    failed = 1;
-                    break;
-                }
-                count++;
-            }
-            closedir(d);
-            if (failed)
-                break;
-        }
-        if (root >= 0)
-            close(root);
-        free(q.b);
-    }
+    rd_scan_start(j);
+    return;
 out:
     j->data = o.b;
     j->dlen = o.len;
@@ -4724,12 +5052,18 @@ out:
 
 static JSValue done_readdir(JSContext *c, FsJob *j) {
     int kind = j->i2, enc = j->enc;
-    JSValue arr = JS_NewArray(c);
-    if (JS_IsException(arr))
-        return arr;
+    ValVec arr = {0};
+    if (j->r > 0) {
+        arr.v = js_malloc(c, (size_t)j->r * sizeof(JSValue));
+        if (!arr.v)
+            return JS_EXCEPTION;
+        arr.cap = (uint32_t)j->r;
+    }
     JSValue dpath = JS_UNDEFINED;
     char *dbuf = NULL, *prev = NULL;
     size_t prevlen = (size_t)-1;
+    const char *prel = NULL;
+    size_t prell = 0;
     if (kind == RD_DIRENTS && !j->i1) {
         dpath = enc == ENC_UTF8 && JS_IsString(j->hold[0]) ? JS_DupValue(c, j->hold[0])
                                                            : encode_bytes(c, (const uint8_t *)j->path, j->plen, enc, NULL);
@@ -4744,7 +5078,6 @@ static JSValue done_readdir(JSContext *c, FsJob *j) {
             goto fail;
         }
     }
-    uint32_t count = 0;
     for (size_t i = 0; i < j->dlen;) {
         int t = j->data[i];
         uint32_t l;
@@ -4758,7 +5091,13 @@ static JSValue done_readdir(JSContext *c, FsJob *j) {
             const char *base = name;
             size_t bl = l;
             if (j->i1) {
-                size_t dl = join_dirname(j->path, j->plen, name, l, dbuf, 2 * FS_PATH_MAX + 4);
+                // (The directory's path: the previous entry's, if of the same.)
+                const char *slash = memrchr(name, '/', l);
+                size_t rl = slash ? (size_t)(slash - name) : 0;
+                int same = prel && rl == prell && memcmp(name, prel, rl) == 0;
+                prel = name;
+                prell = rl;
+                size_t dl = same ? prevlen : join_dirname(j->path, j->plen, name, l, dbuf, 2 * FS_PATH_MAX + 4);
                 if (dl != prevlen || memcmp(dbuf, prev, dl) != 0) {
                     JS_FreeValue(c, dpath);
                     dpath = encode_bytes(c, (const uint8_t *)dbuf, dl, enc, NULL);
@@ -4769,7 +5108,6 @@ static JSValue done_readdir(JSContext *c, FsJob *j) {
                     memcpy(prev, dbuf, dl);
                     prevlen = dl;
                 }
-                const char *slash = memrchr(name, '/', l);
                 if (slash) {
                     base = slash + 1;
                     bl = l - (size_t)(base - name);
@@ -4780,18 +5118,18 @@ static JSValue done_readdir(JSContext *c, FsJob *j) {
         } else {
             v = encode_bytes(c, (const uint8_t *)name, l, enc, NULL);
         }
-        if (JS_IsException(v) || JS_SetPropertyUint32(c, arr, count++, v) < 0)
+        if (vals_push(c, &arr, v) < 0)
             goto fail;
     }
     JS_FreeValue(c, dpath);
     free(dbuf);
     free(prev);
-    return arr;
+    return vals_array(c, &arr);
 fail:
     JS_FreeValue(c, dpath);
     free(dbuf);
     free(prev);
-    JS_FreeValue(c, arr);
+    vals_free(c, &arr);
     return JS_EXCEPTION;
 }
 
@@ -4804,6 +5142,12 @@ static JSValue js_fs_readdir_job(JSContext *c, JSValueConst this_val, int argc, 
         return JS_EXCEPTION;
     }
     j->i1 = JS_ToBool(c, argv[2]);
+    // (Recursive: names as UTF-8, whatever the encoding, as Bun's.)
+    if (j->i1) {
+        j->own_done = 1;
+        if (j->i2 != RD_BUFFERS)
+            j->enc = ENC_UTF8;
+    }
     j->run = run_readdir;
     j->done = done_readdir;
     return job_submit(c, j);

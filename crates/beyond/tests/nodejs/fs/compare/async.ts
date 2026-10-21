@@ -129,6 +129,21 @@ await ta("p mkdtemp", () => fsp.mkdtemp(W + "/pt-").then((p) => p.length - (W + 
 await ta("p readdir", () => fsp.readdir(W + "/pd"));
 await ta("p readdir types", () => fsp.readdir(W + "/pd", { withFileTypes: true }).then((l) => l.map((d) => d.name + d.isDirectory())));
 await ta("p readdir rec", () => fsp.readdir(W + "/pd", { recursive: true }));
+// (Recursive: each directory read on the thread pool, in whichever order
+// they are done; the names UTF-8 whatever the encoding, and the errors of
+// the system call, as Bun's.)
+fs.mkdirSync(W + "/pr/a/b", { recursive: true });
+fs.writeFileSync(W + "/pr/a/b/f", "");
+fs.writeFileSync(W + "/pr/g", "");
+await ta("p readdir rec tree", () => fsp.readdir(W + "/pr", { recursive: true }).then((l) => l.sort()));
+await ta("p readdir rec hex", () => fsp.readdir(W + "/pr", { recursive: true, encoding: "hex" }).then((l) => l.sort()));
+await ta("p readdir rec types hex", () =>
+  fsp.readdir(W + "/pr", { recursive: true, withFileTypes: true, encoding: "hex" }).then((l) =>
+    l.map((d) => d.name + " " + d.parentPath.slice(W.length) + " " + d.isDirectory()).sort()));
+await ta("p readdir rec buffer", () => fsp.readdir(W + "/pr", { recursive: true, encoding: "buffer" }).then((l) => l.map(String).sort()));
+await ta("p readdir rec err", () => fsp.readdir(W + "/nope", { recursive: true }));
+await ta("p readdir rec notdir", () => fsp.readdir(W + "/pr/g", { recursive: true }));
+await tcb("readdir cb rec err", (cb) => fs.readdir(W + "/nope", { recursive: true, withFileTypes: true }, cb));
 await ta("p readlink", () => fsp.readlink(W + "/ln"));
 await ta("p realpath", () => fsp.realpath(W + "/ln"));
 await ta("p symlink", () => fsp.symlink("pw", W + "/pln"));
