@@ -965,6 +965,62 @@ static ssize_t read_retry(int fd, void *b, size_t n) {
     return r;
 }
 
+// The rest of a file (`total` bytes of it, read into the scratch buffer,
+// first; about `size` bytes in all, as fstat said) as a string of Latin-1
+// or UTF-8 (`enc`): its bytes read into an 8-bit string, which is the
+// result if they are Latin-1 or ASCII, else what they decode to. An errno
+// in *no (ENOMEM past the limit of a string), JS_EXCEPTION.
+static JSValue read_into_string(JSContext *c, int fd, size_t total, off_t size, int enc, int *no) {
+    size_t cap = (size_t)(size > (off_t)total ? size : (off_t)total) + 1;
+    const size_t limit = (1u << 30) - 1;
+    if (cap > limit)
+        cap = limit;
+    uint8_t *b;
+    JSValue str = JS_NewStringUninit(c, cap, 0, (void **)&b);
+    if (JS_IsException(str))
+        return str;
+    memcpy(b, scratch, total);
+    for (;;) {
+        if (total == cap) {
+            // (It grew: a string of room for more, the bytes so far copied.)
+            if (cap == limit) {
+                JS_FreeValue(c, str);
+                *no = ENOMEM;
+                return JS_EXCEPTION;
+            }
+            size_t ncap = cap + (cap >> 1) + 8192;
+            if (ncap > limit)
+                ncap = limit;
+            uint8_t *nb;
+            JSValue bigger = JS_NewStringUninit(c, ncap, 0, (void **)&nb);
+            if (JS_IsException(bigger)) {
+                JS_FreeValue(c, str);
+                return bigger;
+            }
+            memcpy(nb, b, total);
+            JS_FreeValue(c, str);
+            str = bigger;
+            b = nb;
+            cap = ncap;
+        }
+        ssize_t n = read_retry(fd, b + total, cap - total);
+        if (n < 0) {
+            *no = errno;
+            JS_FreeValue(c, str);
+            return JS_EXCEPTION;
+        }
+        if (n == 0)
+            break;
+        total += n;
+    }
+    JS_ShrinkNewString(c, str, total);
+    if (enc == ENC_LATIN1 || is_ascii(b, total))
+        return str;
+    JSValue r = encode_bytes(c, b, total, enc, NULL);
+    JS_FreeValue(c, str);
+    return r;
+}
+
 // fsReadFile(pathOrFd, flags, encoding): the file's content, decoded.
 static JSValue js_fs_read_file(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
     Path p;
@@ -1018,6 +1074,22 @@ static JSValue js_fs_read_file(JSContext *c, JSValueConst this_val, int argc, JS
                 free_path(c, &p);
             }
             return throw_sys(c, no, "fstat", NULL, NULL, -1, 0);
+        }
+        if (enc == ENC_UTF8 || enc == ENC_LATIN1) {
+            // (Read straight into an 8-bit string: kept if Latin-1 or
+            // ASCII, else decoded from it as UTF-8.)
+            int no = 0;
+            JSValue r = read_into_string(c, fd, total, st.st_size, enc, &no);
+            if (is_path) {
+                close(fd);
+                ErrPath ep = err_path(&p);
+                if (no)
+                    r = throw_sys(c, no, "read", no == ENOMEM ? &ep : NULL, NULL, -1, 0);
+                free_path(c, &p);
+            } else if (no) {
+                r = throw_sys(c, no, "read", NULL, NULL, -1, 0);
+            }
+            return r;
         }
         size_t cap = (size_t)(st.st_size > (off_t)total ? st.st_size : (off_t)total) + 16;
         uint8_t *buf = js_malloc(c, cap);
