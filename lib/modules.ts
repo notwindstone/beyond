@@ -15,7 +15,7 @@ import { isBuiltin, resolveFile } from "./resolve.ts";
 export const LIB: string = import.meta.dirname;
 
 /** Bun's modules Beyond has, by their files in lib/. */
-const BUN_MODULES: Record<string, string> = { "bun:test": "jest.ts", "bun:internal-for-testing": "internal_for_testing.ts" };
+const BUN_MODULES: Record<string, string> = { "bun:test": "jest.ts", "bun:internal-for-testing": "internal_for_testing.ts", "bun:jsc": "jsc.ts" };
 
 function registry(): Map<string, () => object> | undefined {
   return (globalThis as any)[Symbol.for("luminous.modules")];

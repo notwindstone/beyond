@@ -12,6 +12,7 @@ interface Entry {
   args: any[];
   repeat: boolean;
   delay: number;
+  timer: Timeout | undefined;
 }
 
 const entries = new Map<number, Entry>();
@@ -21,7 +22,8 @@ onTimer((id: number) => {
   const e = entries.get(id);
   if (e === undefined) return;
   if (!e.repeat) entries.delete(id);
-  e.callback(...e.args);
+  // (Called on its Timeout, as Node's and Bun's.)
+  e.callback.apply(e.timer, e.args);
 });
 
 export class Timeout {
@@ -69,9 +71,10 @@ function set(callback: Callback, delay: number, args: any[], repeat: boolean): T
   }
   const id = nextId++;
   const ms = Number(delay) || 0;
-  entries.set(id, { callback, args, repeat, delay: ms });
+  const timer = new Timeout(id);
+  entries.set(id, { callback, args, repeat, delay: ms, timer });
   setTimer(id, ms, repeat);
-  return new Timeout(id);
+  return timer;
 }
 
 function clear(timer: Timeout | number | undefined | null): void {

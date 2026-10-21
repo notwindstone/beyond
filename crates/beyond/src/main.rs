@@ -93,7 +93,7 @@ const NODE_MODULES: &[&str] = &[
 ];
 
 /// Bun's modules Beyond has (`bun:test`), in lib/.
-const BUN_MODULES: &[(&str, &str)] = &[("bun:test", "beyond:jest"), ("bun:internal-for-testing", "beyond:internal_for_testing")];
+const BUN_MODULES: &[(&str, &str)] = &[("bun:test", "beyond:jest"), ("bun:internal-for-testing", "beyond:internal_for_testing"), ("bun:jsc", "beyond:jsc")];
 
 /// What Beyond adds to a program.
 fn embed(opts: &mut BuildOpts) -> Result<()> {

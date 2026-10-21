@@ -3,6 +3,7 @@
 // QuickJS side of the native core. The event loop and the timers are Rust
 // (src/lib.rs); the functions here move values between them and JavaScript.
 
+#include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -337,9 +338,14 @@ JSModuleDef *js_init_module_beyond(JSContext *c, const char *name) {
 // ---- The program's hooks ----
 
 int beyond_init(JSContext *c, int argc, char **argv) {
+    // (A write past RLIMIT_FSIZE fails with EFBIG instead of ending the
+    // program, as Node's and Bun's; children get the default back.)
+    signal(SIGXFSZ, SIG_IGN);
     beyond_system_init(argc, argv);
     beyond_system_install_loader(c);
     ctx = c;
+    // (JavaScriptCore's, as Bun's.)
+    JS_SetStackOverflowMessage(JS_GetRuntime(c), "Maximum call stack size exceeded.");
     on_timer = JS_UNDEFINED;
     JS_SetHostPromiseRejectionTracker(JS_GetRuntime(c), track_rejection, NULL);
     return JS_AddGCMarkHook(JS_GetRuntime(c), mark, NULL) < 0;

@@ -51,7 +51,7 @@ def test_flags(test):
     return [f for f in m.group(1).split() if f.split("=")[0] in GATING_FLAGS] if m else []
 
 
-def run_one(runner, test, cwd, timeout):
+def run_one(runner, test, cwd, root, timeout):
     start = time.time()
     try:
         p = subprocess.run(
@@ -61,7 +61,7 @@ def run_one(runner, test, cwd, timeout):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=timeout,
-            env={**os.environ, "NODE_TEST_DIR": cwd, "TEST_THREAD_ID": str(thread_id())},
+            env={**os.environ, "NODE_TEST_DIR": root, "TEST_THREAD_ID": str(thread_id())},
         )
         status = "pass" if p.returncode == 0 else "fail"
         err = p.stderr.decode(errors="replace").strip()
@@ -101,7 +101,9 @@ def main():
 
     results = []
     with concurrent.futures.ThreadPoolExecutor(a.jobs) as pool:
-        futures = [pool.submit(run_one, runner, os.path.join(parallel, t), root, a.timeout) for t in tests]
+        # (In Bun's repository, as Bun's runner runs them: some read its
+        # test/fixtures.)
+        futures = [pool.submit(run_one, runner, os.path.join(parallel, t), a.bun, root, a.timeout) for t in tests]
         for i, f in enumerate(concurrent.futures.as_completed(futures), 1):
             results.append(f.result())
             if i % 200 == 0:

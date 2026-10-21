@@ -132,9 +132,9 @@ function randomUUIDv7(encoding?: string, timestamp?: number | Date): string | Ui
   throw new TypeError(`Unknown encoding: ${encoding}`);
 }
 
-/** Bun.gc: a collection (always a full one). */
-function gc(_force?: boolean): void {
-  nativeGC();
+/** Bun.gc: a collection (always a full one); the heap's size after it. */
+function gc(_force?: boolean): number {
+  return nativeGC();
 }
 
 /** Bun.Transpiler: TypeScript and JSX made JavaScript. */

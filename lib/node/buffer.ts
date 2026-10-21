@@ -395,7 +395,7 @@ Buffer.alloc = function alloc(size, fill, encoding) {
     const buf = createUnsafeBuffer(size);
     return _fill(buf, fill, 0, buf.length, encoding);
   }
-  return new FastBuffer(size);
+  return createUnsafeBuffer(size);
 };
 
 /**

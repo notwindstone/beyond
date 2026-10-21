@@ -349,10 +349,13 @@ static JSValue js_xxh64_hex(JSContext *c, JSValueConst this_val, int argc, JSVal
     return JS_NewString(c, out);
 }
 
-// gc(): a full collection.
+// gc(): a full collection; the bytes the heap then has.
 static JSValue js_gc(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
-    JS_RunGC(JS_GetRuntime(c));
-    return JS_UNDEFINED;
+    JSRuntime *rt = JS_GetRuntime(c);
+    JS_RunGC(rt);
+    JSMemoryUsage u;
+    JS_ComputeMemoryUsage(rt, &u);
+    return JS_NewFloat64(c, (double)u.malloc_size);
 }
 
 // ---- The console's output ----

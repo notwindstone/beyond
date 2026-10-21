@@ -85,6 +85,7 @@ export function builtins(): unknown[] {
     import.meta.require("node:zlib/iter"),
     import.meta.require("bun:test"),
     import.meta.require("bun:internal-for-testing"),
+    import.meta.require("bun:jsc"),
   ];
 }
 
