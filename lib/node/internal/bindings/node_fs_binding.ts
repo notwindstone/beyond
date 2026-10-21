@@ -10,10 +10,11 @@
 // crates/beyond-rt/native/fs.c (`beyond:native`), which throw Bun's
 // SystemErrors and make the Stats, Dirents and StatFs.
 //
-// The asynchronous forms run the operation when called, then settle the
-// promise or call the callback later: after the jobs (microtasks) queued by
-// then, as Bun's completions come from the event loop, before timers.
-// (Bun runs them on a thread pool: that is still to do here.)
+// The asynchronous forms parse their arguments as the synchronous ones,
+// then hand the operation to fs.c's thread pool (`fsXJob`), which settles
+// the promise or calls the callback once it is done, from the event loop,
+// as Bun's work pool does. (What the pool does not run is run when called,
+// its result reported after the jobs queued by then.)
 
 import {
   fsAccess,
@@ -64,6 +65,47 @@ import {
   fsWriteFile,
   fsWriteString,
   fsWritev,
+  fsAccessJob,
+  fsChmodJob,
+  fsChownJob,
+  fsCloseJob,
+  fsCopyFileJob,
+  fsCpJob,
+  fsExistsJob,
+  fsFchmodJob,
+  fsFchownJob,
+  fsFdatasyncJob,
+  fsFstatJob,
+  fsFsyncJob,
+  fsFtruncateJob,
+  fsFutimesJob,
+  fsLchmodJob,
+  fsLchownJob,
+  fsLinkJob,
+  fsMkdirJob,
+  fsMkdtempJob,
+  fsOpenJob,
+  fsPoolInit,
+  fsReadFileJob,
+  fsReadJob,
+  fsReaddirJob,
+  fsReadlinkJob,
+  fsReadvJob,
+  fsRealpathJob,
+  fsRenameJob,
+  fsRmJob,
+  fsRmdirJob,
+  fsRmdirRecursiveJob,
+  fsStatJob,
+  fsStatfsJob,
+  fsSymlinkJob,
+  fsTruncateJob,
+  fsUnlinkJob,
+  fsUtimesJob,
+  fsWriteFileJob,
+  fsWriteJob,
+  fsWriteStringJob,
+  fsWritevJob,
   promiseNew,
   promiseSettle,
 } from "beyond:native";
@@ -461,6 +503,11 @@ function timeLike(v: any): boolean {
 let phase = 0;
 // Whether the call runs for an asynchronous form.
 let asyncCall = false;
+// What an asynchronous call's job settles: whether a callback (else a
+// promise), and it. An operation returns JOB once its job is queued.
+let jobKind = false;
+let jobTarget: any = undefined;
+const JOB: any = { job: true };
 // The signal of an asynchronous call's options (readFile's, writeFile's):
 // aborted by when it completes, it fails with an AbortError (Bun's
 // AsyncFSTask: HAVE_ABORT_SIGNAL).
@@ -515,22 +562,25 @@ function runAsync(fn: Function, args: any[]): Promise<any> {
   phase = 0;
   asyncCall = true;
   callSignal = undefined;
+  const p = promiseNew();
+  jobKind = false;
+  jobTarget = p;
   let value: any;
   try {
     value = fn.apply(undefined, args);
   } catch (err) {
     asyncCall = false;
     callSignal = undefined;
+    jobTarget = undefined;
     if (phase === 0) throw err;
     phase = 0;
-    const p = promiseNew();
     complete(0, p, err, true);
     return p;
   }
   asyncCall = false;
   phase = 0;
-  const p = promiseNew();
-  complete(0, p, value, false, callSignal);
+  jobTarget = undefined;
+  if (value !== JOB) complete(0, p, value, false, callSignal);
   callSignal = undefined;
   return p;
 }
@@ -540,12 +590,15 @@ function runCallback(fn: Function, callback: any, args: any[]): void {
   phase = 0;
   asyncCall = true;
   callSignal = undefined;
+  jobKind = true;
+  jobTarget = callback;
   let value: any;
   try {
     value = fn.apply(undefined, args);
   } catch (err) {
     asyncCall = false;
     callSignal = undefined;
+    jobTarget = undefined;
     if (phase === 0) throw err;
     phase = 0;
     complete(1, callback, err, true);
@@ -553,7 +606,8 @@ function runCallback(fn: Function, callback: any, args: any[]): void {
   }
   asyncCall = false;
   phase = 0;
-  complete(1, callback, value, false, callSignal);
+  jobTarget = undefined;
+  if (value !== JOB) complete(1, callback, value, false, callSignal);
   callSignal = undefined;
 }
 
@@ -804,6 +858,8 @@ const DirentPrototype: any = Dirent.prototype;
     bigStatFs[k] = 0;
   }
   fsInit(Buffer.prototype, DirentPrototype, stats, bigStats, statFs, bigStatFs);
+  // (The AbortError of a readFile or writeFile whose signal was aborted by when it was done.)
+  fsPoolInit((reason: any) => $makeAbortError(undefined, { cause: reason }));
 }
 
 // ---- Operations ----
@@ -816,11 +872,11 @@ function accessSync(path: any, mode?: any): null {
   const p = requiredPath(path, "path");
   const m = modeNumberOnly(mode);
   phase = 1;
-  if (fsAccess(p, m) === null) {
+  if ((asyncCall ? fsAccessJob(p, m, jobKind, jobTarget) : fsAccess(p, m)) === null) {
     phase = 0;
     throw nullBytes(p);
   }
-  return null;
+  return asyncCall ? JOB : null;
 }
 
 function readFileSync(path: any, options?: any): any {
@@ -848,12 +904,12 @@ function readFileSync(path: any, options?: any): any {
     }
   }
   phase = 1;
-  const r = fsReadFile(p, flag, encoding);
+  const r = asyncCall ? fsReadFileJob(p, flag, encoding, callSignal, jobKind, jobTarget) : fsReadFile(p, flag, encoding);
   if (r === null) {
     phase = 0;
     throw nullBytes(p as string | Uint8Array);
   }
-  return r;
+  return asyncCall ? JOB : r;
 }
 
 function openFileSync(p: string | Uint8Array, flags: number, mode: number): number {
@@ -863,6 +919,24 @@ function openFileSync(p: string | Uint8Array, flags: number, mode: number): numb
     throw nullBytes(p);
   }
   return fd;
+}
+
+/** A job of an operation of one path: JOB, or Bun's error for a NUL byte. */
+function pathJob(r: any, p: string | Uint8Array): any {
+  if (r === null) {
+    phase = 0;
+    throw nullBytes(p);
+  }
+  return JOB;
+}
+
+/** The same, of two paths. */
+function pathsJob(r: any, a: string | Uint8Array, b: string | Uint8Array): any {
+  if (r === null) {
+    phase = 0;
+    throw nullBytes2(a, b);
+  }
+  return JOB;
 }
 
 /** writeFile and appendFile (`defaultFlag`: w or a). */
@@ -912,6 +986,13 @@ function writeFileWith(path: any, data: any, options: any, defaultFlag: number):
     throw abortedError(signal);
   }
   phase = 1;
+  if (asyncCall) {
+    if (fsWriteFileJob(p, d, flag, mode, flush, callSignal, jobKind, jobTarget) === null) {
+      phase = 0;
+      throw nullBytes(p as string | Uint8Array);
+    }
+    return JOB;
+  }
   if (fsWriteFile(p, d, flag, mode, flush) === null) {
     phase = 0;
     throw nullBytes(p as string | Uint8Array);
@@ -930,6 +1011,7 @@ function appendFileSync(path: any, data?: any, options?: any): undefined {
 function closeSync(fd: any): undefined {
   const f = fdArg(fd);
   phase = 1;
+  if (asyncCall) return fsCloseJob(f, jobKind, jobTarget) && JOB;
   fsClose(f);
   return undefined;
 }
@@ -939,6 +1021,7 @@ function copyFileSync(src: any, dest: any, mode?: any): undefined {
   const d = requiredPath(dest, "dest");
   const m = modeNumberOnly(mode);
   phase = 1;
+  if (asyncCall) return pathsJob(fsCopyFileJob(s, d, m, jobKind, jobTarget), s, d);
   if (fsCopyFile(s, d, m) === null) {
     phase = 0;
     throw nullBytes2(s, d);
@@ -954,6 +1037,7 @@ function cpSync(...args: any[]): undefined {
   const errorOnExist = n > 3 ? !!args[3] : false;
   const force = n > 4 ? !!args[4] : true;
   phase = 1;
+  if (asyncCall) return pathsJob(fsCpJob(s, d, recursive, errorOnExist, force, jobKind, jobTarget), s, d);
   if (fsCp(s, d, recursive, errorOnExist, force) === null) {
     phase = 0;
     throw nullBytes2(s, d);
@@ -965,6 +1049,7 @@ function existsSync(path: any): boolean {
   const p = typeof path === "string" ? path : pathLike(path);
   if (p === undefined) return false;
   phase = 1;
+  if (asyncCall) return pathJob(fsExistsJob(p, jobKind, jobTarget), p);
   const r = fsExists(p);
   if (r === null) {
     phase = 0;
@@ -974,13 +1059,14 @@ function existsSync(path: any): boolean {
 }
 
 /** chown, lchown (Bun's errors for a missing uid or gid: the forms' own). */
-function chownWith(args: any[], native: Function): undefined {
+function chownWith(args: any[], native: Function, job: Function): undefined {
   const p = requiredPath(args[0], "path");
   if (args.length < 2) throw invalidArgs("uid is required");
   const uid = validateInteger(args[1], "uid", -1, 4294967295) >>> 0;
   if (args.length < 3) throw invalidArgs("gid is required");
   const gid = validateInteger(args[2], "gid", -1, 4294967295) >>> 0;
   phase = 1;
+  if (asyncCall) return pathJob(job(p, uid, gid, jobKind, jobTarget), p);
   if (native(p, uid, gid) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -989,11 +1075,11 @@ function chownWith(args: any[], native: Function): undefined {
 }
 
 function chownSync(...args: any[]): undefined {
-  return chownWith(args, fsChown);
+  return chownWith(args, fsChown, fsChownJob);
 }
 
 function lchownSync(...args: any[]): undefined {
-  return chownWith(args, fsLchown);
+  return chownWith(args, fsLchown, fsLchownJob);
 }
 
 function fchownSync(...args: any[]): undefined {
@@ -1003,6 +1089,7 @@ function fchownSync(...args: any[]): undefined {
   if (args.length < 3) throw invalidArgs("gid is required");
   const gid = validateInteger(args[2], "gid", -1, 4294967295) >>> 0;
   phase = 1;
+  if (asyncCall) return fsFchownJob(fd, uid, gid, jobKind, jobTarget) && JOB;
   fsFchown(fd, uid, gid);
   return undefined;
 }
@@ -1017,6 +1104,7 @@ function chmodSync(path: any, mode?: any): undefined {
   const p = requiredPath(path, "path");
   const m = requiredMode(mode);
   phase = 1;
+  if (asyncCall) return pathJob(fsChmodJob(p, m, jobKind, jobTarget), p);
   if (fsChmod(p, m) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -1028,6 +1116,7 @@ function lchmodSync(path: any, mode?: any): undefined {
   const p = requiredPath(path, "path");
   const m = requiredMode(mode);
   phase = 1;
+  if (asyncCall) return pathJob(fsLchmodJob(p, m, jobKind, jobTarget), p);
   if (fsLchmod(p, m) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -1039,6 +1128,7 @@ function fchmodSync(fd: any, mode?: any): undefined {
   const f = fdArg(fd);
   const m = requiredMode(mode);
   phase = 1;
+  if (asyncCall) return fsFchmodJob(f, m, jobKind, jobTarget) && JOB;
   fsFchmod(f, m);
   return undefined;
 }
@@ -1046,6 +1136,7 @@ function fchmodSync(fd: any, mode?: any): undefined {
 function fdatasyncSync(fd: any): undefined {
   const f = fdArg(fd);
   phase = 1;
+  if (asyncCall) return fsFdatasyncJob(f, jobKind, jobTarget) && JOB;
   fsFdatasync(f);
   return undefined;
 }
@@ -1053,6 +1144,7 @@ function fdatasyncSync(fd: any): undefined {
 function fsyncSync(fd: any): undefined {
   const f = fdArg(fd);
   phase = 1;
+  if (asyncCall) return fsFsyncJob(f, jobKind, jobTarget) && JOB;
   fsFsync(f);
   return undefined;
 }
@@ -1070,6 +1162,7 @@ function fstatSync(fd: any, options?: any): any {
   const f = fdArg(fd);
   const big = options === undefined ? false : bigintOption(options);
   phase = 1;
+  if (asyncCall) return fsFstatJob(f, big, jobKind, jobTarget) && JOB;
   return fsFstat(f, big);
 }
 
@@ -1084,6 +1177,7 @@ function statWith(path: any, options: any, lstat: boolean): any {
     if (b !== undefined) big = b;
   }
   phase = 1;
+  if (asyncCall) return pathJob(fsStatJob(p, lstat, big, throwIfNoEntry, jobKind, jobTarget), p);
   const r = fsStat(p, lstat, big, throwIfNoEntry);
   if (r === null) {
     phase = 0;
@@ -1104,6 +1198,7 @@ function statfsSync(path: any, options?: any): any {
   const p = requiredPath(path, "path");
   const big = options === undefined ? false : bigintOption(options);
   phase = 1;
+  if (asyncCall) return pathJob(fsStatfsJob(p, big, jobKind, jobTarget), p);
   const r = fsStatfs(p, big);
   if (r === null) {
     phase = 0;
@@ -1116,6 +1211,7 @@ function ftruncateSync(fd: any, len?: any): undefined {
   const f = fdArg(fd);
   const l = len === undefined ? 0 : Math.max(validateInteger(len, "len", -2251799813685248, 4503599627370495), 0);
   phase = 1;
+  if (asyncCall) return fsFtruncateJob(f, l, jobKind, jobTarget) && JOB;
   fsFtruncate(f, l);
   return undefined;
 }
@@ -1125,6 +1221,7 @@ function truncateSync(path: any, len?: any): undefined {
   if (p === undefined) throw invalidArgs("path must be a string or TypedArray");
   const l = len === undefined ? 0 : Math.max(validateInteger(len, "len"), 0);
   phase = 1;
+  if (asyncCall) return typeof p === "number" ? fsFtruncateJob(p, l, jobKind, jobTarget) && JOB : pathJob(fsTruncateJob(p, l, jobKind, jobTarget), p);
   if (typeof p === "number") {
     fsFtruncate(p, l);
   } else if (fsTruncate(p, l) === null) {
@@ -1149,6 +1246,7 @@ function utimesWith(args: any[], nofollow: boolean): undefined {
   const p = requiredPath(args[0], "path");
   const t = timesOf(args, 1);
   phase = 1;
+  if (asyncCall) return pathJob(fsUtimesJob(p, t[0], t[1], t[2], t[3], nofollow, jobKind, jobTarget), p);
   if (fsUtimes(p, t[0], t[1], t[2], t[3], nofollow) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -1168,6 +1266,7 @@ function futimesSync(...args: any[]): undefined {
   const fd = fdArg(args[0]);
   const t = timesOf(args, 1);
   phase = 1;
+  if (asyncCall) return fsFutimesJob(fd, t[0], t[1], t[2], t[3], jobKind, jobTarget) && JOB;
   fsFutimes(fd, t[0], t[1], t[2], t[3]);
   return undefined;
 }
@@ -1176,6 +1275,7 @@ function linkSync(existingPath: any, newPath?: any): undefined {
   const a = requiredPath(existingPath, "oldPath");
   const b = requiredPath(newPath, "newPath");
   phase = 1;
+  if (asyncCall) return pathsJob(fsLinkJob(a, b, jobKind, jobTarget), a, b);
   if (fsLink(a, b) === null) {
     phase = 0;
     throw nullBytes2(a, b);
@@ -1196,6 +1296,7 @@ function symlinkSync(target: any, path?: any, type?: any): undefined {
     }
   }
   phase = 1;
+  if (asyncCall) return pathsJob(fsSymlinkJob(a, b, jobKind, jobTarget), a, b);
   if (fsSymlink(a, b) === null) {
     phase = 0;
     throw nullBytes2(a, b);
@@ -1223,6 +1324,7 @@ function mkdirSync(path: any, options?: any): string | undefined {
     }
   }
   phase = 1;
+  if (asyncCall) return pathJob(fsMkdirJob(p, mode, recursive, jobKind, jobTarget), p);
   const r = fsMkdir(p, mode, recursive);
   if (r === null) {
     phase = 0;
@@ -1236,6 +1338,7 @@ function mkdtempSync(prefix: any, options?: any): any {
   if (p === undefined) throw argType("prefix", "string, Buffer, or URL", prefix);
   const encoding = options === undefined ? ENC_UTF8 : encodingArg(options, ENC_UTF8);
   phase = 1;
+  if (asyncCall) return pathJob(fsMkdtempJob(p, encoding, jobKind, jobTarget), p);
   const r = fsMkdtemp(p, encoding);
   if (r === null) {
     phase = 0;
@@ -1253,6 +1356,7 @@ function openSync(path: any, flags?: any, mode?: any): number {
     if (mm !== undefined) m = mm;
   }
   phase = 1;
+  if (asyncCall) return pathJob(fsOpenJob(p, f, m, jobKind, jobTarget), p);
   return openFileSync(p, f, m);
 }
 
@@ -1288,6 +1392,7 @@ function readSync(fd: any, buffer?: any, offset?: any, length?: any, position?: 
     }
   }
   phase = 1;
+  if (asyncCall) return fsReadJob(f, u8, off, len, pos, jobKind, jobTarget) && JOB;
   return fsRead(f, u8, off, len, pos);
 }
 
@@ -1301,10 +1406,12 @@ function writeSync(fd: any, buffer?: any, offsetOrPosition?: any, lengthOrEncodi
       if (encoding !== ENC_UTF8 && encoding !== ENC_BUFFER) {
         const bytes = Buffer.from(buffer, encodingNames[encoding] as any) as Uint8Array;
         phase = 1;
+        if (asyncCall) return fsWriteJob(f, bytes, 0, bytes.byteLength, pos, jobKind, jobTarget) && JOB;
         return fsWrite(f, bytes, 0, bytes.byteLength, pos);
       }
     }
     phase = 1;
+    if (asyncCall) return fsWriteStringJob(f, buffer, pos, jobKind, jobTarget) && JOB;
     return fsWriteString(f, buffer, pos);
   }
   if (!isBufferLike(buffer)) throw argType("buffer", "string or TypedArray", buffer);
@@ -1332,12 +1439,12 @@ function writeSync(fd: any, buffer?: any, offsetOrPosition?: any, lengthOrEncodi
     }
   }
   phase = 1;
-  const r = fsWrite(f, u8, off, len, pos);
+  const r = asyncCall ? fsWriteJob(f, u8, off, len, pos, jobKind, jobTarget) : fsWrite(f, u8, off, len, pos);
   if (r === null) {
     phase = 0;
     throw writeBoundsError(u8, off, len);
   }
-  return r;
+  return asyncCall ? JOB : r;
 }
 
 /** Bun's error for an offset or a length out of the buffer (length -1: the rest). */
@@ -1370,6 +1477,7 @@ function readvSync(fd: any, buffers?: any, position?: any): number {
   const bufs = vectorArg(buffers);
   const pos = offsetArg(position);
   phase = 1;
+  if (asyncCall) return fsReadvJob(f, bufs, pos, jobKind, jobTarget) && JOB;
   return fsReadv(f, bufs, pos);
 }
 
@@ -1378,6 +1486,7 @@ function writevSync(fd: any, buffers?: any, position?: any): number {
   const bufs = vectorArg(buffers);
   const pos = offsetArg(position);
   phase = 1;
+  if (asyncCall) return fsWritevJob(f, bufs, pos, jobKind, jobTarget) && JOB;
   return fsWritev(f, bufs, pos);
 }
 
@@ -1399,6 +1508,7 @@ function readdirSync(path: any, options?: any): any[] {
   }
   const kind = encoding === ENC_BUFFER ? RD_BUFFERS : withFileTypes ? RD_DIRENTS : RD_NAMES;
   phase = 1;
+  if (asyncCall) return pathJob(fsReaddirJob(p, kind, recursive, encoding, jobKind, jobTarget), p);
   const r = fsReaddir(p, kind, recursive, encoding);
   if (r === null) {
     phase = 0;
@@ -1411,6 +1521,7 @@ function readlinkSync(path: any, options?: any): any {
   const p = typeof path === "string" ? path : requiredPath(path, "path");
   const encoding = options === undefined ? ENC_UTF8 : encodingArg(options, ENC_UTF8);
   phase = 1;
+  if (asyncCall) return pathJob(fsReadlinkJob(p, encoding, jobKind, jobTarget), p);
   const r = fsReadlink(p, encoding);
   if (r === null) {
     phase = 0;
@@ -1423,6 +1534,7 @@ function realpathWith(path: any, options: any, native: boolean): any {
   const p = typeof path === "string" ? path : requiredPath(path, "path");
   const encoding = options === undefined ? ENC_UTF8 : encodingArg(options, ENC_UTF8);
   phase = 1;
+  if (asyncCall) return pathJob(fsRealpathJob(p, encoding, native, jobKind, jobTarget), p);
   const r = fsRealpath(p, encoding, native);
   if (r === null) {
     phase = 0;
@@ -1445,6 +1557,7 @@ function renameSync(oldPath: any, newPath?: any): undefined {
   const b = typeof newPath === "string" ? newPath : pathLike(newPath);
   if (b === undefined) throw argType("newPath", "string or an instance of Buffer or URL", newPath);
   phase = 1;
+  if (asyncCall) return pathsJob(fsRenameJob(a, b, jobKind, jobTarget), a, b);
   if (fsRename(a, b) === null) {
     phase = 0;
     throw nullBytes2(a, b);
@@ -1494,6 +1607,7 @@ function rmSync(path: any, options?: any): undefined {
   const p = requiredPath(path, "path");
   const o = rmOptions(options, true);
   phase = 1;
+  if (asyncCall) return pathJob(fsRmJob(p, o[0], o[1], jobKind, jobTarget), p);
   if (fsRm(p, o[0], o[1]) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -1505,6 +1619,7 @@ function rmdirSync(path: any, options?: any): undefined {
   const p = requiredPath(path, "path");
   const o = rmOptions(options, false);
   phase = 1;
+  if (asyncCall) return pathJob(o[0] ? fsRmdirRecursiveJob(p, jobKind, jobTarget) : fsRmdirJob(p, jobKind, jobTarget), p);
   if ((o[0] ? fsRmdirRecursive(p) : fsRmdir(p)) === null) {
     phase = 0;
     throw nullBytes(p);
@@ -1515,6 +1630,7 @@ function rmdirSync(path: any, options?: any): undefined {
 function unlinkSync(path: any): undefined {
   const p = typeof path === "string" ? path : requiredPath(path, "path");
   phase = 1;
+  if (asyncCall) return pathJob(fsUnlinkJob(p, jobKind, jobTarget), p);
   if (fsUnlink(p) === null) {
     phase = 0;
     throw nullBytes(p);

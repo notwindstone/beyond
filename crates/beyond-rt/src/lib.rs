@@ -194,8 +194,8 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         }
         // SAFETY: the loop is live.
         // (Idle keep-alive connections of fetch() do not keep it alive, nor
-        // the unreferenced children and pipes of Bun.spawn, and fs.watch's
-        // unreferenced watchers: those are still
+        // the unreferenced children and pipes of Bun.spawn, fs.watch's
+        // unreferenced watchers and the idle thread pool: those are still
         // polled while something else does.)
         let all = unsafe { beyond_loop_num_polls(uloop) };
         let polls = all - unsafe { beyond_client_idle_count() + beyond_spawn_unrefd() + beyond_fs_unrefd() };

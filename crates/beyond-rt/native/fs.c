@@ -372,8 +372,11 @@ enum { SHAPE_STATS, SHAPE_BIGSTATS, SHAPE_STATFS, SHAPE_BIGSTATFS, SHAPE_DIRENT 
 // fs.watch's dispatcher (fsWatchStart's): (id, kind, value, close).
 static JSValue watch_dispatch = JS_UNDEFINED;
 
+static void pool_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+
 static void fs_mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
     (void)opaque;
+    pool_mark(rt, mark_func);
     JS_MarkValue(rt, watch_dispatch, mark_func);
     JS_MarkValue(rt, buffer_proto, mark_func);
     JS_MarkValue(rt, dirent_proto, mark_func);
@@ -1520,20 +1523,28 @@ static JSValue js_fs_realpath(JSContext *c, JSValueConst this_val, int argc, JSV
 
 // ---- Directories ----
 
-// Bun's mkdir with `recursive`: the first directory made, or undefined.
-static JSValue mkdir_recursive(JSContext *c, const char *path, size_t len, mode_t mode, ErrPath *ep) {
-    char w[FS_PATH_MAX + 1];
-    if (mkdir(path, mode) == 0)
-        return JS_NewStringLen(c, path, len);
+// Bun's mkdir with `recursive` (no JavaScript): 0 and in *first the length
+// of the first directory made (MKDIR_NONE: none was), or an errno and in
+// *err_len the length of its path, of `path`'s bytes (`w`, FS_PATH_MAX + 1
+// bytes, is the work buffer).
+#define MKDIR_NONE ((size_t)-1)
+static int mkdir_recursive_core(const char *path, size_t len, mode_t mode, char *w, size_t *first, size_t *err_len) {
+    *err_len = len;
+    if (mkdir(path, mode) == 0) {
+        *first = len;
+        return 0;
+    }
     int no = errno;
     if (no == EEXIST || no == EISDIR) {
         struct stat st;
-        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
-            return JS_UNDEFINED;
-        return throw_sys(c, no, "mkdir", ep, NULL, -1, 0);
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            *first = MKDIR_NONE;
+            return 0;
+        }
+        return no;
     }
     if (no != ENOENT)
-        return throw_sys(c, no, "mkdir", ep, NULL, -1, 0);
+        return no;
     memcpy(w, path, len);
     w[len] = 0;
     size_t i = len - 1;
@@ -1550,30 +1561,41 @@ static JSValue mkdir_recursive(JSContext *c, const char *path, size_t len, mode_
             if (no == EEXIST)
                 break;
             if (no != ENOENT) {
-                w[i] = 0;
-                ErrPath pe = {w, i, JS_UNDEFINED};
-                return throw_sys(c, no, "mkdir", &pe, NULL, -1, 0);
+                *err_len = i;
+                return no;
             }
             i--;
             continue;
         }
         i--;
     }
-    size_t first = i;
+    *first = i;
     // Then forward from it.
     for (i++; i < len; i++) {
         if (path[i] == '/') {
             w[i] = 0;
-            if (mkdir(w, mode) < 0 && errno != EEXIST) {
-                no = errno;
-                return throw_sys(c, no, "mkdir", ep, NULL, -1, 0);
-            }
+            if (mkdir(w, mode) < 0 && errno != EEXIST)
+                return errno;
             w[i] = '/';
         }
     }
     if (mkdir(w, mode) < 0 && errno != EEXIST)
-        return throw_sys(c, errno, "mkdir", ep, NULL, -1, 0);
-    return JS_NewStringLen(c, w, first);
+        return errno;
+    return 0;
+}
+
+// Bun's mkdir with `recursive`: the first directory made, or undefined.
+static JSValue mkdir_recursive(JSContext *c, const char *path, size_t len, mode_t mode, ErrPath *ep) {
+    char w[FS_PATH_MAX + 1];
+    size_t first, el;
+    int no = mkdir_recursive_core(path, len, mode, w, &first, &el);
+    if (no) {
+        ErrPath pe = {path, el, el == len ? ep->js : JS_UNDEFINED};
+        return throw_sys(c, no, "mkdir", &pe, NULL, -1, 0);
+    }
+    if (first == MKDIR_NONE)
+        return JS_UNDEFINED;
+    return JS_NewStringLen(c, path, first);
 }
 
 // fsMkdir(path, mode, recursive).
@@ -2245,17 +2267,31 @@ done:
 
 // ---- cp (Bun's cp_sync_inner, for what the binding's fast path takes) ----
 
+// (No JavaScript: the pool's threads run it too. Its error is kept: an
+// errno, the system call, and a path of the copy's buffers, if any.)
 typedef struct {
-    JSContext *c;
     int error_on_exist, force, recursive;
+    int no;
+    const char *syscall;
+    int has_path;
+    char err_path[FS_PATH_MAX + 1];
     char src[FS_PATH_MAX + 1], dest[FS_PATH_MAX + 1];
 } Cp;
 
-// Throws the copy's error (a path of the copy's buffers).
+// Keeps the copy's error.
 static int cp_throw(Cp *cp, int no, const char *syscall, const char *path) {
-    ErrPath ep = {path, path ? strlen(path) : 0, JS_UNDEFINED};
-    throw_sys(cp->c, no, syscall, path ? &ep : NULL, NULL, -1, 0);
+    cp->no = no;
+    cp->syscall = syscall;
+    cp->has_path = path != NULL;
+    if (path)
+        snprintf(cp->err_path, sizeof cp->err_path, "%s", path);
     return -1;
+}
+
+// The copy's error, thrown.
+static JSValue cp_error(JSContext *c, Cp *cp) {
+    ErrPath ep = {cp->err_path, strlen(cp->err_path), JS_UNDEFINED};
+    return make_sys(c, cp->no, cp->syscall, cp->has_path ? &ep : NULL, NULL, -1, 0);
 }
 
 static int mkdir_p(const char *path, mode_t mode) {
@@ -2456,7 +2492,6 @@ static JSValue js_fs_cp(JSContext *c, JSValueConst this_val, int argc, JSValueCo
         js_free(c, cp);
         return path_fail(r);
     }
-    cp->c = c;
     cp->recursive = JS_ToBool(c, argv[2]);
     cp->error_on_exist = JS_ToBool(c, argv[3]);
     cp->force = JS_ToBool(c, argv[4]);
@@ -2466,8 +2501,13 @@ static JSValue js_fs_cp(JSContext *c, JSValueConst this_val, int argc, JSValueCo
     free_path(c, a);
     free_path(c, b);
     js_free(c, a);
+    JSValue ret = JS_UNDEFINED;
+    if (r < 0) {
+        JSValue e = cp_error(c, cp);
+        ret = JS_IsException(e) ? e : JS_Throw(c, e);
+    }
     js_free(c, cp);
-    return r < 0 ? JS_EXCEPTION : JS_UNDEFINED;
+    return ret;
 }
 
 // ---- The event loop ----
@@ -2531,8 +2571,8 @@ static Watch **watches;
 static int nwatches;
 
 // The loop's polls of fs.c that do not keep the program alive (they are
-// still polled while something else does): unreferenced watchers (the loop
-// leaves them out: src/lib.rs).
+// still polled while something else does): unreferenced watchers, and the
+// thread pool's while it has no job (the loop leaves them out: src/lib.rs).
 static int fs_unrefd;
 
 int beyond_fs_unrefd(void) { return fs_unrefd; }
@@ -3024,6 +3064,1671 @@ static JSValue js_fs_jobs_pending(JSContext *c, JSValueConst this_val, int argc,
     return JS_NewBool(c, JS_IsJobPending(JS_GetRuntime(c)));
 }
 
+// ---- The thread pool: the asynchronous calls (Bun's work pool) ----
+//
+// An asynchronous call is a job: made on the JavaScript thread (its
+// arguments copied, paths and a string's UTF-8; a buffer's bytes stay the
+// buffer's, which the job holds), run on one of the pool's threads (the
+// system calls only), then finished on the JavaScript thread once the
+// loop finds it done (an eventfd, polled by uSockets' loop, as Bun's
+// completions come to its event loop): its value made, or its error (as
+// the synchronous call's), its promise settled or its callback called, and
+// the jobs (microtasks) those queued run before the next one finishes.
+
+#include <pthread.h>
+#include <sys/eventfd.h>
+
+void beyond_flush_stdout(void);
+
+enum { JOB_PROMISE, JOB_CALLBACK };
+// What the error of a job names (with its errno and system call).
+#define JERR_PATH 1
+#define JERR_DEST 2
+#define JERR_FD 4
+#define JERR_OWN 8 // a path of its own (err_buf)
+
+typedef struct FsJob FsJob;
+struct FsJob {
+    FsJob *next;               // (in the queue, then the list of done jobs)
+    FsJob *live_prev, *live_next; // (the jobs not finished: their values marked)
+    void (*run)(FsJob *);      // on a pool thread
+    JSValue (*done)(JSContext *, FsJob *); // its value, on the JavaScript thread
+    int kind;
+    JSValue target;            // the promise, or the callback
+    JSValue hold[2];           // what it reads (buffers), its error's paths' strings
+    JSValue signal;            // an AbortSignal, aborted by when it is done: an AbortError
+    // The result: 0, or an errno and its system call.
+    int no;
+    const char *syscall;
+    int err_what, err_fd, err_flags;
+    char *err_buf;
+    size_t err_len;
+    // Arguments.
+    char *path, *path2;
+    size_t plen, p2len;
+    int32_t fd, flags, mode, enc, i1, i2, i3;
+    int64_t a, b, pos;
+    uint8_t *buf;
+    size_t blen;
+    struct iovec *iov;
+    int iovcnt;
+    // Results.
+    int64_t r;
+    FsStat st;
+    uint8_t *data;
+    size_t dlen;
+    char inline_path[2][192];
+};
+
+static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pool_cond = PTHREAD_COND_INITIALIZER;
+static FsJob *pool_head, *pool_tail;
+static int pool_threads, pool_idle, pool_max;
+static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
+static FsJob *done_head;
+static int pool_efd = -1;
+static struct us_internal_callback_t *pool_poll;
+static FsJob *live; // (JavaScript thread)
+static int inflight;
+static JSValue abort_error_hook = JS_UNDEFINED; // (signal reason) -> its AbortError
+
+static void pool_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
+    JS_MarkValue(rt, abort_error_hook, mark_func);
+    for (FsJob *j = live; j; j = j->live_next) {
+        JS_MarkValue(rt, j->target, mark_func);
+        JS_MarkValue(rt, j->hold[0], mark_func);
+        JS_MarkValue(rt, j->hold[1], mark_func);
+        JS_MarkValue(rt, j->signal, mark_func);
+    }
+}
+
+static void *pool_main(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&pool_lock);
+    for (;;) {
+        while (!pool_head) {
+            pool_idle++;
+            pthread_cond_wait(&pool_cond, &pool_lock);
+            pool_idle--;
+        }
+        FsJob *j = pool_head;
+        pool_head = j->next;
+        if (!pool_head)
+            pool_tail = NULL;
+        pthread_mutex_unlock(&pool_lock);
+        if (!j->no)
+            j->run(j);
+        pthread_mutex_lock(&done_lock);
+        int first = done_head == NULL;
+        j->next = done_head;
+        done_head = j;
+        pthread_mutex_unlock(&done_lock);
+        if (first) {
+            uint64_t one = 1;
+            while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
+                ;
+        }
+        pthread_mutex_lock(&pool_lock);
+    }
+    return NULL;
+}
+
+static void pool_on_ready(struct us_internal_callback_t *cb);
+
+static int pool_start(void) {
+    if (pool_poll)
+        return 0;
+    pool_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (pool_efd < 0)
+        return -1;
+    struct us_loop_t *loop = uws_get_loop();
+    pool_poll = (struct us_internal_callback_t *)us_create_poll(loop, 0, sizeof(struct us_internal_callback_t) - sizeof(struct us_poll_t));
+    if (!pool_poll) {
+        close(pool_efd);
+        pool_efd = -1;
+        return -1;
+    }
+    us_poll_init(&pool_poll->p, pool_efd, POLL_TYPE_CALLBACK);
+    pool_poll->loop = loop;
+    pool_poll->cb_expects_the_loop = 0;
+    pool_poll->leave_poll_ready = 1;
+    pool_poll->cb = pool_on_ready;
+    us_poll_start(&pool_poll->p, loop, LIBUS_SOCKET_READABLE);
+    // (It keeps the program alive while jobs are out.)
+    fs_unrefd++;
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    pool_max = n < 2 ? 2 : n > 64 ? 64 : (int)n;
+    return 0;
+}
+
+static FsJob *job_new(JSContext *c, JSValueConst kind, JSValueConst target) {
+    FsJob *j = malloc(sizeof *j);
+    if (!j) {
+        JS_ThrowOutOfMemory(c);
+        return NULL;
+    }
+    // (Only what a job reads before setting it.)
+    j->kind = JS_ToBool(c, kind) ? JOB_CALLBACK : JOB_PROMISE;
+    j->target = JS_DupValue(c, target);
+    j->hold[0] = j->hold[1] = JS_UNDEFINED;
+    j->signal = JS_UNDEFINED;
+    j->no = 0;
+    j->syscall = NULL;
+    j->err_what = 0;
+    j->err_fd = -1;
+    j->err_flags = 0;
+    j->err_buf = NULL;
+    j->path = j->path2 = NULL;
+    j->plen = j->p2len = 0;
+    j->iov = NULL;
+    j->data = NULL;
+    j->dlen = 0;
+    j->r = 0;
+    j->done = NULL;
+    return j;
+}
+
+static void job_free(JSContext *c, FsJob *j) {
+    JS_FreeValue(c, j->target);
+    JS_FreeValue(c, j->hold[0]);
+    JS_FreeValue(c, j->hold[1]);
+    JS_FreeValue(c, j->signal);
+    if (j->path && j->path != j->inline_path[0])
+        free(j->path);
+    if (j->path2 && j->path2 != j->inline_path[1])
+        free(j->path2);
+    free(j->err_buf);
+    free(j->iov);
+    free(j->data);
+    free(j);
+}
+
+// A path argument of the job (`which`: 0 its path, 1 its dest), copied: as
+// get_path's, PATH_NUL for one with a NUL (the job is to be freed), or one
+// too long the job's error (ENAMETOOLONG of `open`, without a syscall).
+static int job_path(JSContext *c, FsJob *j, JSValueConst v, int which) {
+    Path p;
+    int r;
+    p.js = v;
+    p.cstr = NULL;
+    const char *s;
+    size_t len;
+    if (JS_IsString(v)) {
+        s = JS_ToCStringLen(c, &len, v);
+        if (!s)
+            return PATH_EXCEPTION;
+        p.cstr = s;
+    } else {
+        s = (const char *)JS_GetUint8Array(c, &len, v);
+        if (!s)
+            return PATH_EXCEPTION;
+    }
+    if (memchr(s, 0, len)) {
+        free_path(c, &p);
+        return PATH_NUL;
+    }
+    char *d = len < sizeof j->inline_path[which] ? j->inline_path[which] : malloc(len + 1);
+    if (!d) {
+        free_path(c, &p);
+        JS_ThrowOutOfMemory(c);
+        return PATH_EXCEPTION;
+    }
+    memcpy(d, s, len);
+    d[len] = 0;
+    free_path(c, &p);
+    if (which) {
+        j->path2 = d;
+        j->p2len = len;
+    } else {
+        j->path = d;
+        j->plen = len;
+    }
+    j->hold[which] = JS_DupValue(c, v);
+    r = PATH_OK;
+    if (len >= FS_PATH_MAX && !j->no) {
+        j->no = ENAMETOOLONG;
+        j->syscall = "open";
+        j->err_what = which ? JERR_DEST : JERR_PATH;
+        j->err_flags = ERR_NO_SYSCALL_PROP;
+    }
+    return r;
+}
+
+// (On a pool thread.) The job's error: errno, its system call, what it names.
+static void job_errno(FsJob *j, const char *syscall, int what) {
+    j->no = errno;
+    j->syscall = syscall;
+    j->err_what = what;
+}
+
+// The job's error, as the synchronous call's.
+static JSValue job_error(JSContext *c, FsJob *j) {
+    ErrPath ep = {j->path, j->plen, j->hold[0]}, ed = {j->path2, j->p2len, j->hold[1]};
+    if (j->err_what & JERR_OWN) {
+        ep.p = j->err_buf;
+        ep.len = j->err_len;
+        ep.js = JS_UNDEFINED;
+    }
+    if (j->err_what & JERR_DEST && !(j->err_what & JERR_PATH)) {
+        ep = ed;
+        return make_sys(c, j->no, j->syscall, &ep, NULL, -1, j->err_flags);
+    }
+    return make_sys(c, j->no, j->syscall, (j->err_what & (JERR_PATH | JERR_OWN)) ? &ep : NULL,
+                    (j->err_what & JERR_DEST) ? &ed : NULL, (j->err_what & JERR_FD) ? j->err_fd : -1, j->err_flags);
+}
+
+// Hands the job to the pool: JS_TRUE (the binding's: it is queued).
+static JSValue job_submit(JSContext *c, FsJob *j) {
+    if (pool_start() < 0) {
+        job_free(c, j);
+        return JS_ThrowInternalError(c, "the thread pool could not be started");
+    }
+    j->live_prev = NULL;
+    j->live_next = live;
+    if (live)
+        live->live_prev = j;
+    live = j;
+    if (inflight++ == 0)
+        fs_unrefd--;
+    pthread_mutex_lock(&pool_lock);
+    j->next = NULL;
+    if (pool_tail)
+        pool_tail->next = j;
+    else
+        pool_head = j;
+    pool_tail = j;
+    if (pool_idle > 0) {
+        pthread_cond_signal(&pool_cond);
+    } else if (pool_threads < pool_max) {
+        pthread_t t;
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_attr_setstacksize(&attr, 512 * 1024);
+        if (pthread_create(&t, &attr, pool_main, NULL) == 0)
+            pool_threads++;
+        pthread_attr_destroy(&attr);
+    }
+    pthread_mutex_unlock(&pool_lock);
+    return JS_TRUE;
+}
+
+static void job_finish(JSContext *c, FsJob *j) {
+    JSValue v;
+    int is_err = 0;
+    if (j->no) {
+        v = job_error(c, j);
+        is_err = 1;
+    } else {
+        v = j->done ? j->done(c, j) : JS_UNDEFINED;
+    }
+    if (JS_IsException(v)) {
+        v = JS_GetException(c);
+        is_err = 1;
+    }
+    if (!is_err && !JS_IsUndefined(j->signal)) {
+        JSValue aborted = JS_GetPropertyStr(c, j->signal, "aborted");
+        if (JS_ToBool(c, aborted)) {
+            JSValue reason = JS_GetPropertyStr(c, j->signal, "reason");
+            JSValue e = JS_Call(c, abort_error_hook, JS_UNDEFINED, 1, &reason);
+            JS_FreeValue(c, reason);
+            JS_FreeValue(c, v);
+            v = JS_IsException(e) ? JS_GetException(c) : e;
+            is_err = 1;
+        }
+        JS_FreeValue(c, aborted);
+    }
+    JSValue target = j->target;
+    j->target = JS_UNDEFINED;
+    int kind = j->kind;
+    if (j->live_prev)
+        j->live_prev->live_next = j->live_next;
+    else
+        live = j->live_next;
+    if (j->live_next)
+        j->live_next->live_prev = j->live_prev;
+    job_free(c, j);
+    if (--inflight == 0)
+        fs_unrefd++;
+    if (kind == JOB_PROMISE) {
+        JS_SettlePromise(c, target, v, is_err);
+    } else {
+        JSValue args[2] = {JS_NULL, v};
+        JSValue r = is_err ? JS_Call(c, target, JS_UNDEFINED, 1, &v) : JS_Call(c, target, JS_UNDEFINED, 2, args);
+        if (JS_IsException(r))
+            beyond_js_report();
+        JS_FreeValue(c, r);
+    }
+    JS_FreeValue(c, v);
+    JS_FreeValue(c, target);
+    if (beyond_js_run_jobs() < 0)
+        beyond_js_report();
+}
+
+static void pool_on_ready(struct us_internal_callback_t *cb) {
+    (void)cb;
+    uint64_t v;
+    while (read(pool_efd, &v, sizeof v) < 0 && errno == EINTR)
+        ;
+    pthread_mutex_lock(&done_lock);
+    FsJob *list = done_head;
+    done_head = NULL;
+    pthread_mutex_unlock(&done_lock);
+    // (In the order they were done.)
+    FsJob *rev = NULL;
+    while (list) {
+        FsJob *n = list->next;
+        list->next = rev;
+        rev = list;
+        list = n;
+    }
+    JSContext *c = beyond_js_context();
+    while (rev) {
+        FsJob *j = rev;
+        rev = j->next;
+        job_finish(c, j);
+    }
+}
+
+// fsPoolInit(abortError): the AbortError of an aborted signal's reason.
+static JSValue js_fs_pool_init(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JS_FreeValue(c, abort_error_hook);
+    abort_error_hook = JS_DupValue(c, argv[0]);
+    return JS_UNDEFINED;
+}
+
+// The job's path argument, or the native's own return for a bad one.
+#define JOB_PATH(j, v, which)                                                                                           \
+    do {                                                                                                               \
+        int jp_ = job_path(c, j, v, which);                                                                            \
+        if (jp_) {                                                                                                     \
+            job_free(c, j);                                                                                            \
+            return path_fail(jp_);                                                                                     \
+        }                                                                                                              \
+    } while (0)
+
+// The kind and target of a job, the native's last two arguments.
+#define JOB_NEW(n)                                                                                                     \
+    FsJob *j = job_new(c, argv[n], argv[(n) + 1]);                                                                     \
+    if (!j)                                                                                                            \
+    return JS_EXCEPTION
+
+// ---- The jobs ----
+//
+// Each `fsXJob(..., kind, target)` takes what `fsX` takes, then whether a
+// callback (else a promise) is the target, and it: true once queued; null
+// for a path with a NUL (as fsX: the binding throws Bun's error).
+
+// stat, lstat.
+static void run_stat(FsJob *j) {
+    if (do_stat(AT_FDCWD, j->path, j->i1 ? AT_SYMLINK_NOFOLLOW : 0, &j->st) < 0) {
+        if (errno == ENOENT && !j->i3) {
+            j->r = -1;
+            return;
+        }
+        job_errno(j, j->i1 ? "lstat" : "stat", JERR_PATH);
+    }
+}
+
+static JSValue done_stat(JSContext *c, FsJob *j) {
+    return j->r < 0 ? JS_UNDEFINED : make_stats(c, &j->st, j->i2);
+}
+
+// fsStatJob(path, lstat, bigint, throwIfNoEntry, kind, target).
+static JSValue js_fs_stat_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(4);
+    JOB_PATH(j, argv[0], 0);
+    j->i1 = JS_ToBool(c, argv[1]);
+    j->i2 = JS_ToBool(c, argv[2]);
+    j->i3 = JS_ToBool(c, argv[3]);
+    j->run = run_stat;
+    j->done = done_stat;
+    return job_submit(c, j);
+}
+
+static void run_fstat(FsJob *j) {
+    if (do_stat(j->fd, "", AT_EMPTY_PATH, &j->st) < 0)
+        job_errno(j, "fstat", 0);
+}
+
+// fsFstatJob(fd, bigint, kind, target).
+static JSValue js_fs_fstat_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(2);
+    j->i2 = JS_ToBool(c, argv[1]);
+    if (to_i32(c, argv[0], &j->fd)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_fstat;
+    j->done = done_stat;
+    return job_submit(c, j);
+}
+
+static void run_statfs(FsJob *j) {
+    struct statfs sf;
+    if (statfs(j->path, &sf) < 0) {
+        job_errno(j, "statfs", JERR_PATH);
+        return;
+    }
+    // (Its fields, in the FsStat's.)
+    uint64_t *f = &j->st.dev;
+    f[0] = (uint64_t)sf.f_type, f[1] = (uint64_t)sf.f_bsize, f[2] = (uint64_t)sf.f_frsize;
+    f[3] = (uint64_t)sf.f_blocks, f[4] = (uint64_t)sf.f_bfree, f[5] = (uint64_t)sf.f_bavail;
+    f[6] = (uint64_t)sf.f_files, f[7] = (uint64_t)sf.f_ffree;
+}
+
+static JSValue done_statfs(JSContext *c, FsJob *j) {
+    const uint64_t *f = &j->st.dev;
+    void *shape = shapes[j->i2 ? SHAPE_BIGSTATFS : SHAPE_STATFS];
+    if (!shape)
+        return JS_ThrowInternalError(c, "fsInit was not called");
+    JSValue v[8];
+    for (int i = 0; i < 8; i++)
+        v[i] = j->i2 ? JS_NewBigInt64(c, (int64_t)f[i]) : JS_NewInt64(c, (int64_t)f[i]);
+    return JS_NewObjectWithCachedShape(c, shape, v);
+}
+
+// fsStatfsJob(path, bigint, kind, target).
+static JSValue js_fs_statfs_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(2);
+    JOB_PATH(j, argv[0], 0);
+    j->i2 = JS_ToBool(c, argv[1]);
+    j->run = run_statfs;
+    j->done = done_statfs;
+    return job_submit(c, j);
+}
+
+static JSValue done_int(JSContext *c, FsJob *j) {
+    return JS_NewInt64(c, j->r);
+}
+
+static JSValue done_bool(JSContext *c, FsJob *j) {
+    return JS_NewBool(c, j->r != 0);
+}
+
+static void run_open(FsJob *j) {
+    int fd = open_retry(j->path, j->flags, j->mode);
+    if (fd < 0)
+        job_errno(j, "open", JERR_PATH);
+    else
+        j->r = fd;
+}
+
+// fsOpenJob(path, flags, mode, kind, target).
+static JSValue js_fs_open_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(3);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->flags) || to_i32(c, argv[2], &j->mode)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_open;
+    j->done = done_int;
+    return job_submit(c, j);
+}
+
+static void run_close(FsJob *j) {
+    if (close(j->fd) < 0 && errno != EINTR) {
+        job_errno(j, "close", JERR_FD);
+        j->err_fd = j->fd;
+    }
+}
+
+// fsCloseJob(fd, kind, target).
+static JSValue js_fs_close_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(1);
+    if (to_i32(c, argv[0], &j->fd)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_close;
+    return job_submit(c, j);
+}
+
+static void run_rw(FsJob *j) {
+    ssize_t n;
+    do {
+        if (j->i1)
+            n = j->pos >= 0 ? pwrite(j->fd, j->buf, j->blen, j->pos) : write(j->fd, j->buf, j->blen);
+        else
+            n = j->pos >= 0 ? pread(j->fd, j->buf, j->blen, j->pos) : read(j->fd, j->buf, j->blen);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) {
+        job_errno(j, j->i1 ? "write" : "read", j->pos >= 0 ? JERR_FD : 0);
+        j->err_fd = j->fd;
+    } else {
+        j->r = n;
+    }
+}
+
+// fsReadJob(fd, uint8array, offset, length, position, kind, target),
+// fsWriteJob(...): as fsRead, fsWrite (the buffer held while it runs).
+static JSValue js_fs_rw_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    int32_t fd;
+    size_t size;
+    int64_t off, len, pos;
+    if (to_i32(c, argv[0], &fd))
+        return JS_EXCEPTION;
+    uint8_t *b = JS_GetUint8Array(c, &size, argv[1]);
+    if (!b && size == 0 && JS_HasException(c))
+        return JS_EXCEPTION;
+    if (JS_ToInt64(c, &off, argv[2]) || JS_ToInt64(c, &len, argv[3]) || to_pos(c, argv[4], &pos))
+        return JS_EXCEPTION;
+    if (magic) {
+        if (off < 0 || (uint64_t)off > size)
+            return JS_NULL;
+        if (len == -1)
+            len = (int64_t)(size - (uint64_t)off);
+        else if (len < 0 || len > INT32_MAX || (uint64_t)len > size - (uint64_t)off)
+            return JS_NULL;
+    } else if (off < 0 || len < 0 || (uint64_t)off > size || (uint64_t)len > size - (uint64_t)off) {
+        return JS_ThrowRangeError(c, "read out of the buffer's bounds");
+    }
+    JOB_NEW(5);
+    j->fd = fd;
+    j->buf = b + off;
+    j->blen = (size_t)len;
+    j->pos = pos;
+    j->i1 = magic;
+    j->hold[0] = JS_DupValue(c, argv[1]);
+    j->run = run_rw;
+    j->done = done_int;
+    return job_submit(c, j);
+}
+
+// fsWriteStringJob(fd, string, position, kind, target).
+static JSValue js_fs_write_string_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    int32_t fd;
+    int64_t pos;
+    size_t len;
+    if (to_i32(c, argv[0], &fd) || to_pos(c, argv[2], &pos))
+        return JS_EXCEPTION;
+    const char *s = JS_ToCStringLen(c, &len, argv[1]);
+    if (!s)
+        return JS_EXCEPTION;
+    JOB_NEW(3);
+    j->data = malloc(len ? len : 1);
+    if (!j->data) {
+        JS_FreeCString(c, s);
+        job_free(c, j);
+        return JS_ThrowOutOfMemory(c);
+    }
+    memcpy(j->data, s, len);
+    JS_FreeCString(c, s);
+    beyond_rt_wtf8_fix(j->data, len);
+    j->fd = fd;
+    j->buf = j->data;
+    j->blen = len;
+    j->pos = pos;
+    j->i1 = 1;
+    j->run = run_rw;
+    j->done = done_int;
+    return job_submit(c, j);
+}
+
+static void run_rwv(FsJob *j) {
+    ssize_t r;
+    do {
+        if (j->i1)
+            r = j->pos >= 0 ? pwritev(j->fd, j->iov, j->iovcnt, j->pos) : writev(j->fd, j->iov, j->iovcnt);
+        else
+            r = j->pos >= 0 ? preadv(j->fd, j->iov, j->iovcnt, j->pos) : readv(j->fd, j->iov, j->iovcnt);
+    } while (r < 0 && errno == EINTR);
+    if (r < 0) {
+        const char *sc = j->i1 ? (j->pos >= 0 ? "pwritev" : "writev") : (j->pos >= 0 ? "preadv" : "readv");
+        job_errno(j, sc, j->i1 && j->pos >= 0 ? 0 : JERR_FD);
+        j->err_fd = j->fd;
+    } else {
+        j->r = r;
+    }
+}
+
+// fsReadvJob(fd, buffers, position, kind, target), fsWritevJob(...).
+static JSValue js_fs_rwv_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    int32_t fd;
+    int64_t pos, n;
+    if (to_i32(c, argv[0], &fd) || to_pos(c, argv[2], &pos) || JS_GetLength(c, argv[1], &n))
+        return JS_EXCEPTION;
+    if (n > IOV_MAX)
+        n = IOV_MAX;
+    JOB_NEW(3);
+    j->iov = malloc(sizeof *j->iov * (n ? n : 1));
+    // (The buffers held: an array of them, of its own.)
+    JSValue held = JS_NewArray(c);
+    if (!j->iov || JS_IsException(held)) {
+        JS_FreeValue(c, held);
+        job_free(c, j);
+        return JS_ThrowOutOfMemory(c);
+    }
+    j->hold[0] = held;
+    for (int64_t i = 0; i < n; i++) {
+        JSValue v = JS_GetPropertyUint32(c, argv[1], (uint32_t)i);
+        size_t len;
+        uint8_t *b = JS_IsException(v) ? NULL : JS_GetUint8Array(c, &len, v);
+        if (!b && JS_HasException(c)) {
+            JS_FreeValue(c, v);
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+        j->iov[i].iov_base = b;
+        j->iov[i].iov_len = b ? len : 0;
+        JS_SetPropertyUint32(c, held, (uint32_t)i, v);
+    }
+    j->iovcnt = (int)n;
+    j->fd = fd;
+    j->pos = pos;
+    j->i1 = magic;
+    j->run = run_rwv;
+    j->done = done_int;
+    return job_submit(c, j);
+}
+
+// readFile: the file read into memory of the job's (malloc'd), then made
+// a Buffer of it (taken) or decoded.
+static void run_read_file(FsJob *j) {
+    int fd = j->fd;
+    if (j->path) {
+        fd = open_retry(j->path, j->flags | O_NOCTTY, 0666);
+        if (fd < 0) {
+            job_errno(j, "open", JERR_PATH);
+            return;
+        }
+    }
+    struct stat st;
+    size_t cap = 64 * 1024;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0)
+        cap = (size_t)st.st_size + 1;
+    size_t limit = j->enc == ENC_BUFFER ? (size_t)INT32_MAX : (size_t)(1 << 30) - 1;
+    uint8_t *b = malloc(cap);
+    size_t total = 0;
+    if (!b) {
+        errno = ENOMEM;
+        job_errno(j, "read", 0);
+        goto out;
+    }
+    for (;;) {
+        if (total == cap) {
+            size_t ncap = cap + (cap >> 1) + 8192;
+            uint8_t *nb = realloc(b, ncap);
+            if (!nb) {
+                errno = ENOMEM;
+                job_errno(j, "read", 0);
+                goto out;
+            }
+            b = nb;
+            cap = ncap;
+        }
+        ssize_t n = read_retry(fd, b + total, cap - total);
+        if (n < 0) {
+            job_errno(j, "read", 0);
+            goto out;
+        }
+        if (n == 0)
+            break;
+        total += n;
+        if (total > limit) {
+            errno = ENOMEM;
+            job_errno(j, "read", j->path ? JERR_PATH : 0);
+            goto out;
+        }
+    }
+    j->data = b;
+    j->dlen = total;
+    b = NULL;
+out:
+    free(b);
+    if (j->path)
+        close(fd);
+}
+
+// (Memory of the C library's, which a job read a file into.)
+static void *sys_realloc_ab(JSRuntime *rt, void *opaque, void *ptr, size_t size) {
+    (void)rt;
+    (void)opaque;
+    if (size == 0) {
+        free(ptr);
+        return NULL;
+    }
+    return realloc(ptr, size);
+}
+
+static JSValue done_read_file(JSContext *c, FsJob *j) {
+    if (j->enc == ENC_BUFFER) {
+        // (The job's memory, the Buffer's now.)
+        uint8_t *d = j->data;
+        size_t n = j->dlen;
+        if (n == 0)
+            return new_buffer(c, NULL, (const uint8_t *)"", 0);
+        JSValue u8 = JS_NewUint8Array(c, d, n, sys_realloc_ab, NULL, false);
+        if (JS_IsException(u8))
+            return u8;
+        j->data = NULL;
+        if (JS_IsObject(buffer_proto) && JS_SetPrototype(c, u8, buffer_proto) < 0) {
+            JS_FreeValue(c, u8);
+            return JS_EXCEPTION;
+        }
+        return u8;
+    }
+    return encode_bytes(c, j->data ? j->data : (const uint8_t *)"", j->dlen, j->enc, NULL);
+}
+
+// fsReadFileJob(pathOrFd, flags, encoding, signal, kind, target).
+static JSValue js_fs_read_file_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(4);
+    if (to_i32(c, argv[1], &j->flags) || to_i32(c, argv[2], &j->enc)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    if (JS_IsNumber(argv[0])) {
+        if (to_i32(c, argv[0], &j->fd)) {
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+    } else {
+        JOB_PATH(j, argv[0], 0);
+    }
+    if (JS_IsObject(argv[3]))
+        j->signal = JS_DupValue(c, argv[3]);
+    j->run = run_read_file;
+    j->done = done_read_file;
+    return job_submit(c, j);
+}
+
+static void run_write_file(FsJob *j) {
+    int fd = j->fd;
+    if (j->path) {
+        // (As fsWriteFile: O_TRUNC left out, the file cut after.)
+        fd = open_retry(j->path, (j->flags & O_APPEND) ? j->flags : j->flags & ~O_TRUNC, j->mode);
+        if (fd < 0) {
+            job_errno(j, "open", JERR_PATH);
+            return;
+        }
+    }
+    size_t done = 0;
+    int no = 0;
+    while (done < j->blen) {
+        ssize_t n = write(fd, j->buf + done, j->blen - done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            no = errno;
+            break;
+        }
+        if (n == 0)
+            break;
+        done += n;
+    }
+    if (j->path && (j->flags & O_TRUNC) && !(j->flags & O_APPEND)) {
+        int r;
+        do
+            r = ftruncate(fd, (off_t)done);
+        while (r < 0 && errno == EINTR);
+    }
+    if (!no && j->i1)
+        fsync(fd);
+    if (j->path)
+        close(fd);
+    if (no) {
+        errno = no;
+        job_errno(j, "write", 0);
+    }
+}
+
+// fsWriteFileJob(pathOrFd, data, flags, mode, flush, signal, kind, target).
+static JSValue js_fs_write_file_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(6);
+    if (to_i32(c, argv[2], &j->flags) || to_i32(c, argv[3], &j->mode)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = JS_ToBool(c, argv[4]);
+    if (JS_IsString(argv[1])) {
+        size_t len;
+        const char *s = JS_ToCStringLen(c, &len, argv[1]);
+        if (!s) {
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+        j->data = malloc(len ? len : 1);
+        if (!j->data) {
+            JS_FreeCString(c, s);
+            job_free(c, j);
+            return JS_ThrowOutOfMemory(c);
+        }
+        memcpy(j->data, s, len);
+        JS_FreeCString(c, s);
+        beyond_rt_wtf8_fix(j->data, len);
+        j->buf = j->data;
+        j->blen = len;
+    } else {
+        size_t len;
+        uint8_t *b = JS_GetUint8Array(c, &len, argv[1]);
+        if (!b && JS_HasException(c)) {
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+        j->buf = b;
+        j->blen = b ? len : 0;
+        j->hold[1] = JS_DupValue(c, argv[1]);
+    }
+    if (JS_IsNumber(argv[0])) {
+        if (to_i32(c, argv[0], &j->fd)) {
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+    } else {
+        // (The data held in hold[1]: the path's string is hold[0].)
+        JOB_PATH(j, argv[0], 0);
+    }
+    if (JS_IsObject(argv[5]))
+        j->signal = JS_DupValue(c, argv[5]);
+    j->run = run_write_file;
+    return job_submit(c, j);
+}
+
+static JSValue done_null(JSContext *c, FsJob *j) {
+    return JS_NULL;
+}
+
+static void run_access(FsJob *j) {
+    if (access(j->path, j->mode) < 0)
+        job_errno(j, "access", JERR_PATH);
+}
+
+// fsAccessJob(path, mode, kind, target).
+static JSValue js_fs_access_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(2);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->mode)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_access;
+    j->done = done_null;
+    return job_submit(c, j);
+}
+
+static void run_exists(FsJob *j) {
+    j->r = access(j->path, F_OK) == 0;
+}
+
+// fsExistsJob(path, kind, target).
+static JSValue js_fs_exists_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(1);
+    JOB_PATH(j, argv[0], 0);
+    j->run = run_exists;
+    j->done = done_bool;
+    return job_submit(c, j);
+}
+
+static void run_path_op(FsJob *j) {
+    int r;
+    const char *sc;
+    switch (j->i1) {
+    case OP_UNLINK:
+        r = unlink(j->path), sc = "unlink";
+        break;
+    case OP_RMDIR:
+        r = rmdir(j->path), sc = "rmdir";
+        break;
+    case OP_CHMOD:
+        r = chmod(j->path, (mode_t)j->a), sc = "chmod";
+        break;
+    case OP_LCHMOD:
+        r = fchmodat(AT_FDCWD, j->path, (mode_t)j->a, AT_SYMLINK_NOFOLLOW), sc = "lchmod";
+        break;
+    case OP_CHOWN:
+        r = chown(j->path, (uid_t)j->a, (gid_t)j->b), sc = "chown";
+        break;
+    case OP_LCHOWN:
+        r = lchown(j->path, (uid_t)j->a, (gid_t)j->b), sc = "lchown";
+        break;
+    default:
+        r = truncate(j->path, j->a & INT64_MAX), sc = "truncate";
+    }
+    if (r < 0)
+        job_errno(j, sc, JERR_PATH);
+}
+
+// fsUnlinkJob(path, kind, target), ... as fsUnlink and the others.
+static JSValue js_fs_path_op_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    int nargs = magic == OP_CHOWN || magic == OP_LCHOWN ? 3 : magic >= OP_CHMOD ? 2 : 1;
+    JOB_NEW(nargs);
+    JOB_PATH(j, argv[0], 0);
+    j->a = j->b = 0;
+    if ((nargs > 1 && JS_ToInt64(c, &j->a, argv[1])) || (nargs > 2 && JS_ToInt64(c, &j->b, argv[2]))) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = magic;
+    j->run = run_path_op;
+    return job_submit(c, j);
+}
+
+static void run_fd_op(FsJob *j) {
+    int r;
+    const char *sc;
+    int what = 0;
+    switch (j->i1) {
+    case OP_FSYNC:
+        r = fsync(j->fd), sc = "fsync";
+        break;
+    case OP_FDATASYNC:
+        r = fdatasync(j->fd), sc = "fdatasync", what = JERR_FD;
+        break;
+    case OP_FCHMOD:
+        r = fchmod(j->fd, (mode_t)j->a), sc = "fchmod";
+        break;
+    case OP_FCHOWN:
+        r = fchown(j->fd, (uid_t)j->a, (gid_t)j->b), sc = "fchown";
+        break;
+    default:
+        do
+            r = ftruncate(j->fd, j->a & INT64_MAX);
+        while (r < 0 && errno == EINTR);
+        sc = "ftruncate";
+    }
+    if (r < 0) {
+        job_errno(j, sc, what);
+        j->err_fd = j->fd;
+    }
+}
+
+// fsFsyncJob(fd, kind, target), ... as fsFsync and the others.
+static JSValue js_fs_fd_op_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    int nargs = magic == OP_FCHOWN ? 3 : magic >= OP_FCHMOD ? 2 : 1;
+    JOB_NEW(nargs);
+    j->a = j->b = 0;
+    if (to_i32(c, argv[0], &j->fd) || (nargs > 1 && JS_ToInt64(c, &j->a, argv[1])) ||
+        (nargs > 2 && JS_ToInt64(c, &j->b, argv[2]))) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = magic;
+    j->run = run_fd_op;
+    return job_submit(c, j);
+}
+
+static void run_two_paths(FsJob *j) {
+    int r;
+    const char *sc;
+    switch (j->i1) {
+    case OP_RENAME:
+        r = rename(j->path, j->path2), sc = "rename";
+        break;
+    case OP_LINK:
+        r = link(j->path, j->path2), sc = "link";
+        break;
+    default:
+        r = symlink(j->path, j->path2), sc = "symlink";
+    }
+    if (r < 0)
+        job_errno(j, sc, JERR_PATH | JERR_DEST);
+}
+
+// fsRenameJob(from, to, kind, target), fsLinkJob, fsSymlinkJob.
+static JSValue js_fs_two_paths_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    JOB_NEW(2);
+    JOB_PATH(j, argv[0], 0);
+    JOB_PATH(j, argv[1], 1);
+    j->i1 = magic;
+    j->run = run_two_paths;
+    return job_submit(c, j);
+}
+
+static void run_utimes(FsJob *j) {
+    struct timespec ts[2] = {{(time_t)j->a, (long)j->i2}, {(time_t)j->b, (long)j->i3}};
+    if (j->path) {
+        if (utimensat(AT_FDCWD, j->path, ts, j->i1 ? AT_SYMLINK_NOFOLLOW : 0) < 0)
+            job_errno(j, j->i1 ? "lutime" : "utime", JERR_PATH);
+    } else if (futimens(j->fd, ts) < 0) {
+        job_errno(j, "futime", 0);
+    }
+}
+
+// fsUtimesJob(path, atimeSec, atimeNsec, mtimeSec, mtimeNsec, nofollow,
+// kind, target), fsFutimesJob(fd, ..., kind, target).
+static JSValue js_fs_utimes_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic) {
+    struct timespec ts[2];
+    if (get_times(c, argv + 1, ts))
+        return JS_EXCEPTION;
+    JOB_NEW(magic ? 5 : 6);
+    if (magic) {
+        if (to_i32(c, argv[0], &j->fd)) {
+            job_free(c, j);
+            return JS_EXCEPTION;
+        }
+    } else {
+        JOB_PATH(j, argv[0], 0);
+        j->i1 = JS_ToBool(c, argv[5]);
+    }
+    j->a = ts[0].tv_sec, j->i2 = (int32_t)ts[0].tv_nsec;
+    j->b = ts[1].tv_sec, j->i3 = (int32_t)ts[1].tv_nsec;
+    j->run = run_utimes;
+    return job_submit(c, j);
+}
+
+static JSValue done_bytes(JSContext *c, FsJob *j) {
+    return encode_bytes(c, j->data ? j->data : (const uint8_t *)"", j->dlen, j->enc, NULL);
+}
+
+static void run_readlink(FsJob *j) {
+    j->data = malloc(FS_PATH_MAX + 1);
+    if (!j->data) {
+        errno = ENOMEM;
+        job_errno(j, "readlink", JERR_PATH);
+        return;
+    }
+    ssize_t n = readlink(j->path, (char *)j->data, FS_PATH_MAX);
+    if (n < 0)
+        job_errno(j, "readlink", JERR_PATH);
+    else
+        j->dlen = (size_t)n;
+}
+
+// fsReadlinkJob(path, encoding, kind, target).
+static JSValue js_fs_readlink_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(2);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->enc)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_readlink;
+    j->done = done_bytes;
+    return job_submit(c, j);
+}
+
+static void run_realpath(FsJob *j) {
+    const char *sc = j->i1 ? "realpath" : "lstat";
+    char abs[FS_PATH_MAX + 1];
+    if (resolve_path(j->path, j->plen, abs) < 0) {
+        errno = ENAMETOOLONG;
+        job_errno(j, sc, JERR_PATH);
+        return;
+    }
+    j->data = malloc(FS_PATH_MAX + 1);
+    if (!j->data) {
+        errno = ENOMEM;
+        job_errno(j, sc, JERR_PATH);
+        return;
+    }
+    char *out = (char *)j->data;
+    int fd = open_retry(abs, O_PATH, 0);
+    if (fd < 0) {
+        job_errno(j, sc, JERR_PATH);
+        return;
+    }
+    char proc[64];
+    snprintf(proc, sizeof proc, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(proc, out, FS_PATH_MAX);
+    int no = errno;
+    close(fd);
+    if (n < 0) {
+        if (!realpath(abs, out)) {
+            errno = no;
+            job_errno(j, sc, JERR_PATH);
+            return;
+        }
+        n = strlen(out);
+    }
+    j->dlen = (size_t)n;
+}
+
+static JSValue done_realpath(JSContext *c, FsJob *j) {
+    // (The path given, when it is the canonical one.)
+    if (j->enc == ENC_UTF8 && JS_IsString(j->hold[0]) && j->dlen == j->plen && memcmp(j->data, j->path, j->dlen) == 0)
+        return JS_DupValue(c, j->hold[0]);
+    return done_bytes(c, j);
+}
+
+// fsRealpathJob(path, encoding, native, kind, target).
+static JSValue js_fs_realpath_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(3);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->enc)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = JS_ToBool(c, argv[2]);
+    j->run = run_realpath;
+    j->done = done_realpath;
+    return job_submit(c, j);
+}
+
+static void run_mkdir(FsJob *j) {
+    if (j->plen == 0) {
+        errno = ENOENT;
+        job_errno(j, "mkdir", JERR_PATH);
+        return;
+    }
+    if (!j->i1) {
+        if (mkdir(j->path, (mode_t)j->mode) < 0)
+            job_errno(j, "mkdir", JERR_PATH);
+        j->r = -1;
+        return;
+    }
+    char w[FS_PATH_MAX + 1];
+    size_t first, el;
+    int no = mkdir_recursive_core(j->path, j->plen, (mode_t)j->mode, w, &first, &el);
+    if (no) {
+        j->no = no;
+        j->syscall = "mkdir";
+        if (el == j->plen) {
+            j->err_what = JERR_PATH;
+        } else {
+            j->err_buf = malloc(el + 1);
+            if (j->err_buf) {
+                memcpy(j->err_buf, j->path, el);
+                j->err_buf[el] = 0;
+                j->err_len = el;
+                j->err_what = JERR_OWN;
+            }
+        }
+        return;
+    }
+    j->r = first == MKDIR_NONE ? -1 : (int64_t)first;
+}
+
+static JSValue done_mkdir(JSContext *c, FsJob *j) {
+    return j->r < 0 ? JS_UNDEFINED : JS_NewStringLen(c, j->path, (size_t)j->r);
+}
+
+// fsMkdirJob(path, mode, recursive, kind, target).
+static JSValue js_fs_mkdir_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(3);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->mode)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = JS_ToBool(c, argv[2]);
+    j->run = run_mkdir;
+    j->done = done_mkdir;
+    return job_submit(c, j);
+}
+
+static void run_mkdtemp(FsJob *j) {
+    size_t n = j->plen < FS_PATH_MAX ? j->plen : FS_PATH_MAX;
+    j->data = malloc(n + 8);
+    if (!j->data) {
+        errno = ENOMEM;
+        job_errno(j, "mkdtemp", JERR_PATH);
+        return;
+    }
+    char *t = (char *)j->data;
+    memcpy(t, j->path, n);
+    memcpy(t + n, "XXXXXX", 7);
+    if (!mkdtemp(t)) {
+        j->no = errno;
+        j->syscall = "mkdtemp";
+        j->err_buf = malloc(n + 7);
+        if (j->err_buf) {
+            memcpy(j->err_buf, t, n + 7);
+            j->err_len = n + 6;
+            j->err_what = JERR_OWN;
+        }
+        return;
+    }
+    j->dlen = n + 6;
+}
+
+// fsMkdtempJob(prefix, encoding, kind, target).
+static JSValue js_fs_mkdtemp_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(2);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->enc)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    if (j->plen == 0) {
+        j->no = EINVAL;
+        j->syscall = "mkdtemp";
+        j->err_buf = strdup("XXXXX");
+        j->err_len = 5;
+        j->err_what = j->err_buf ? JERR_OWN : 0;
+    }
+    j->run = run_mkdtemp;
+    j->done = done_bytes;
+    return job_submit(c, j);
+}
+
+// readdir: the entries collected (type, then the name's length and bytes:
+// recursive, the path relative to the root), then made the JavaScript
+// values fsReaddir makes.
+typedef struct {
+    uint8_t *b;
+    size_t len, cap;
+} Bytes;
+
+static int bytes_put(Bytes *o, int type, const char *n, size_t nl) {
+    if (o->len + 5 + nl > o->cap) {
+        size_t cap = o->cap ? o->cap * 2 : 4096;
+        while (cap < o->len + 5 + nl)
+            cap *= 2;
+        uint8_t *b = realloc(o->b, cap);
+        if (!b)
+            return -1;
+        o->b = b;
+        o->cap = cap;
+    }
+    uint8_t *p = o->b + o->len;
+    uint32_t l = (uint32_t)nl;
+    p[0] = (uint8_t)type;
+    memcpy(p + 1, &l, 4);
+    memcpy(p + 5, n, nl);
+    o->len += 5 + nl;
+    return 0;
+}
+
+static void run_readdir(FsJob *j) {
+    Bytes o = {0};
+    int count = 0;
+    if (!j->i1) {
+        int fd = open_retry(j->path, O_DIRECTORY | O_RDONLY, 0);
+        DIR *d = fd < 0 ? NULL : fdopendir(fd);
+        if (!d) {
+            int no = errno;
+            if (fd >= 0)
+                close(fd);
+            errno = no;
+            job_errno(j, "scandir", JERR_PATH);
+            return;
+        }
+        for (;;) {
+            errno = 0;
+            struct dirent *e = readdir(d);
+            if (!e) {
+                if (errno)
+                    job_errno(j, "scandir", JERR_PATH);
+                break;
+            }
+            const char *n = e->d_name;
+            if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0)))
+                continue;
+            int t = dirent_kind(e->d_type);
+            if (j->i2 == RD_DIRENTS && e->d_type == DT_UNKNOWN) {
+                struct stat st;
+                if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0)
+                    t = mode_kind(st.st_mode);
+            }
+            if (bytes_put(&o, t, n, strlen(n)) < 0) {
+                errno = ENOMEM;
+                job_errno(j, "scandir", JERR_PATH);
+                break;
+            }
+            count++;
+        }
+        closedir(d);
+        goto out;
+    }
+    // Recursive: as fsReaddir's (breadth first, symbolic links followed as
+    // directories, entries that vanish meanwhile left out).
+    {
+        Bytes q = {0}; // the directories to read: their paths relative to the root
+        size_t qh = 0;
+        int root = -1;
+        char joinbuf[2 * FS_PATH_MAX + 4];
+        for (int first = 1;; first = 0) {
+            const char *rel = NULL;
+            size_t rl = 0;
+            if (!first) {
+                if (qh >= q.len)
+                    break;
+                uint32_t l;
+                memcpy(&l, q.b + qh + 1, 4);
+                rel = (const char *)q.b + qh + 5;
+                rl = l;
+                memcpy(joinbuf, rel, rl);
+                joinbuf[rl] = 0;
+                rel = joinbuf;
+                qh += 5 + l;
+            }
+            char relbuf[2 * FS_PATH_MAX + 4];
+            if (!first) {
+                memcpy(relbuf, rel, rl + 1);
+                rel = relbuf;
+            }
+            int fd = first ? open_retry(j->path, O_DIRECTORY | O_RDONLY, 0)
+                           : openat(root, rel, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+            if (fd < 0) {
+                if (first) {
+                    job_errno(j, "scandir", JERR_PATH);
+                    break;
+                }
+                if (errno == ENOENT || errno == ENOTDIR || errno == EPERM)
+                    continue;
+                job_errno(j, "scandir", 0);
+                break;
+            }
+            if (first)
+                root = dup(fd);
+            DIR *d = fdopendir(fd);
+            if (!d) {
+                close(fd);
+                job_errno(j, "scandir", JERR_PATH);
+                break;
+            }
+            int failed = 0;
+            for (;;) {
+                errno = 0;
+                struct dirent *e = readdir(d);
+                if (!e) {
+                    int no = errno;
+                    if (no && (first || !(no == ENOENT || no == ENOTDIR || no == EPERM))) {
+                        job_errno(j, "scandir", JERR_PATH);
+                        failed = 1;
+                    }
+                    break;
+                }
+                const char *n = e->d_name;
+                if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0)))
+                    continue;
+                size_t nl = strlen(n);
+                const char *name = n;
+                size_t namel = nl;
+                char full[2 * FS_PATH_MAX + 4];
+                if (!first) {
+                    if (rl + 1 + nl > 2 * FS_PATH_MAX)
+                        continue;
+                    memcpy(full, rel, rl);
+                    full[rl] = '/';
+                    memcpy(full + rl + 1, n, nl);
+                    full[rl + 1 + nl] = 0;
+                    name = full;
+                    namel = rl + 1 + nl;
+                }
+                int t = dirent_kind(e->d_type);
+                int enqueue = t == 2 || t == 3;
+                if (e->d_type == DT_UNKNOWN) {
+                    struct stat st;
+                    if (fstatat(dirfd(d), n, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                        t = mode_kind(st.st_mode);
+                        enqueue = t == 2 || t == 3;
+                    }
+                }
+                if ((enqueue && nl + 1 + namel <= FS_PATH_MAX && bytes_put(&q, 0, name, namel) < 0) ||
+                    bytes_put(&o, t, name, namel) < 0) {
+                    errno = ENOMEM;
+                    job_errno(j, "scandir", JERR_PATH);
+                    failed = 1;
+                    break;
+                }
+                count++;
+            }
+            closedir(d);
+            if (failed)
+                break;
+        }
+        if (root >= 0)
+            close(root);
+        free(q.b);
+    }
+out:
+    j->data = o.b;
+    j->dlen = o.len;
+    j->r = count;
+}
+
+static JSValue done_readdir(JSContext *c, FsJob *j) {
+    int kind = j->i2, enc = j->enc;
+    JSValue arr = JS_NewArray(c);
+    if (JS_IsException(arr))
+        return arr;
+    JSValue dpath = JS_UNDEFINED;
+    char *dbuf = NULL, *prev = NULL;
+    size_t prevlen = (size_t)-1;
+    if (kind == RD_DIRENTS && !j->i1) {
+        dpath = enc == ENC_UTF8 && JS_IsString(j->hold[0]) ? JS_DupValue(c, j->hold[0])
+                                                           : encode_bytes(c, (const uint8_t *)j->path, j->plen, enc, NULL);
+        if (JS_IsException(dpath))
+            goto fail;
+    }
+    if (kind == RD_DIRENTS && j->i1) {
+        dbuf = malloc(2 * FS_PATH_MAX + 4);
+        prev = malloc(2 * FS_PATH_MAX + 4);
+        if (!dbuf || !prev) {
+            JS_ThrowOutOfMemory(c);
+            goto fail;
+        }
+    }
+    uint32_t count = 0;
+    for (size_t i = 0; i < j->dlen;) {
+        int t = j->data[i];
+        uint32_t l;
+        memcpy(&l, j->data + i + 1, 4);
+        const char *name = (const char *)j->data + i + 5;
+        i += 5 + l;
+        JSValue v;
+        if (kind == RD_BUFFERS) {
+            v = new_buffer(c, NULL, (const uint8_t *)name, l);
+        } else if (kind == RD_DIRENTS) {
+            const char *base = name;
+            size_t bl = l;
+            if (j->i1) {
+                size_t dl = join_dirname(j->path, j->plen, name, l, dbuf, 2 * FS_PATH_MAX + 4);
+                if (dl != prevlen || memcmp(dbuf, prev, dl) != 0) {
+                    JS_FreeValue(c, dpath);
+                    dpath = encode_bytes(c, (const uint8_t *)dbuf, dl, enc, NULL);
+                    if (JS_IsException(dpath)) {
+                        dpath = JS_UNDEFINED;
+                        goto fail;
+                    }
+                    memcpy(prev, dbuf, dl);
+                    prevlen = dl;
+                }
+                const char *slash = memrchr(name, '/', l);
+                if (slash) {
+                    base = slash + 1;
+                    bl = l - (size_t)(base - name);
+                }
+            }
+            JSValue nm = encode_bytes(c, (const uint8_t *)base, bl, enc, NULL);
+            v = JS_IsException(nm) ? nm : new_dirent(c, nm, t, dpath);
+        } else {
+            v = encode_bytes(c, (const uint8_t *)name, l, enc, NULL);
+        }
+        if (JS_IsException(v) || JS_SetPropertyUint32(c, arr, count++, v) < 0)
+            goto fail;
+    }
+    JS_FreeValue(c, dpath);
+    free(dbuf);
+    free(prev);
+    return arr;
+fail:
+    JS_FreeValue(c, dpath);
+    free(dbuf);
+    free(prev);
+    JS_FreeValue(c, arr);
+    return JS_EXCEPTION;
+}
+
+// fsReaddirJob(path, kind, recursive, encoding, kind, target).
+static JSValue js_fs_readdir_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(4);
+    JOB_PATH(j, argv[0], 0);
+    if (to_i32(c, argv[1], &j->i2) || to_i32(c, argv[3], &j->enc)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->i1 = JS_ToBool(c, argv[2]);
+    j->run = run_readdir;
+    j->done = done_readdir;
+    return job_submit(c, j);
+}
+
+static void run_rm(FsJob *j) {
+    int no;
+    if (j->i1) {
+        no = j->plen == 0 ? ENOENT : delete_tree(AT_FDCWD, j->path, 0);
+        if (no && no != ENOENT)
+            no = rm_tree_errno(no);
+    } else {
+        no = unlink(j->path) == 0 ? 0 : errno;
+        if (no && no != ENOENT) {
+            switch (no) {
+            case EACCES: case ELOOP: case ENAMETOOLONG: case ENOMEM: case EROFS: case EBUSY:
+                break;
+            default:
+                no = EFAULT;
+            }
+        }
+    }
+    if (no == ENOENT) {
+        if (!j->i2) {
+            errno = ENOENT;
+            job_errno(j, "lstat", JERR_PATH);
+        }
+        return;
+    }
+    if (no) {
+        errno = no;
+        job_errno(j, "rm", JERR_PATH);
+    }
+}
+
+// fsRmJob(path, recursive, force, kind, target).
+static JSValue js_fs_rm_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(3);
+    JOB_PATH(j, argv[0], 0);
+    j->i1 = JS_ToBool(c, argv[1]);
+    j->i2 = JS_ToBool(c, argv[2]);
+    j->run = run_rm;
+    return job_submit(c, j);
+}
+
+static void run_rmdir_recursive(FsJob *j) {
+    int no = j->plen == 0 ? ENOENT : delete_tree(AT_FDCWD, j->path, 0);
+    if (!no)
+        return;
+    switch (no) {
+    case EACCES: no = EPERM; break;
+    case ENOENT: case EPERM: case ELOOP: case ENAMETOOLONG: case ENOMEM: case EROFS: case EIO: case EBUSY:
+    case ENOTDIR: case EISDIR: case EMFILE: case ENFILE: case EINVAL: case EFBIG:
+        break;
+    default:
+        no = EFAULT;
+    }
+    errno = no;
+    job_errno(j, "rmdir", 0);
+}
+
+// fsRmdirRecursiveJob(path, kind, target).
+static JSValue js_fs_rmdir_recursive_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(1);
+    JOB_PATH(j, argv[0], 0);
+    j->run = run_rmdir_recursive;
+    return job_submit(c, j);
+}
+
+static void run_copy_file(FsJob *j) {
+    int no = 0, mode = j->mode;
+    int src = open_retry(j->path, O_RDONLY, 0644), dest = -1;
+    struct stat st;
+    if (src < 0) {
+        no = errno;
+        goto done;
+    }
+    if (fstat(src, &st) < 0) {
+        no = errno;
+        goto done;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        no = ENOTSUP;
+        goto done;
+    }
+    dest = open_retry(j->path2, O_CREAT | O_WRONLY | ((mode & 1) ? O_EXCL : 0), st.st_mode);
+    if (dest < 0) {
+        no = errno;
+        goto done;
+    }
+    if (mode & 4) {
+        if (ioctl(dest, FICLONE, src) < 0) {
+            no = errno;
+            close(dest);
+            dest = -1;
+            unlink(j->path2);
+            goto done;
+        }
+        fchmod(dest, st.st_mode);
+        goto done;
+    }
+    if (ficlone_works) {
+        if (ioctl(dest, FICLONE, src) == 0) {
+            fchmod(dest, st.st_mode);
+            goto done;
+        }
+        ficlone_works = 0;
+    }
+    {
+        uint64_t wrote = 0;
+        no = copy_data(src, dest, (size_t)st.st_size, &wrote);
+        if (ftruncate(dest, (off_t)wrote) < 0) {
+        }
+        fchmod(dest, st.st_mode);
+    }
+done:
+    if (src >= 0)
+        close(src);
+    if (dest >= 0)
+        close(dest);
+    if (no) {
+        errno = no;
+        job_errno(j, "copyfile", JERR_PATH | JERR_DEST);
+    }
+}
+
+// fsCopyFileJob(src, dest, mode, kind, target).
+static JSValue js_fs_copy_file_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(3);
+    JOB_PATH(j, argv[0], 0);
+    JOB_PATH(j, argv[1], 1);
+    if (to_i32(c, argv[2], &j->mode)) {
+        job_free(c, j);
+        return JS_EXCEPTION;
+    }
+    j->run = run_copy_file;
+    return job_submit(c, j);
+}
+
+static void run_cp(FsJob *j) {
+    Cp *cp = malloc(sizeof *cp);
+    if (!cp) {
+        errno = ENOMEM;
+        job_errno(j, "copyfile", 0);
+        return;
+    }
+    cp->recursive = j->i1;
+    cp->error_on_exist = j->i2;
+    cp->force = j->i3;
+    memcpy(cp->src, j->path, j->plen + 1);
+    memcpy(cp->dest, j->path2, j->p2len + 1);
+    if (cp_inner(cp, j->plen, j->p2len, 1) < 0) {
+        j->no = cp->no;
+        j->syscall = cp->syscall;
+        if (cp->has_path) {
+            j->err_buf = strdup(cp->err_path);
+            if (j->err_buf) {
+                j->err_len = strlen(j->err_buf);
+                j->err_what = JERR_OWN;
+            }
+        }
+    }
+    free(cp);
+}
+
+// fsCpJob(src, dest, recursive, errorOnExist, force, kind, target).
+static JSValue js_fs_cp_job(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    JOB_NEW(5);
+    JOB_PATH(j, argv[0], 0);
+    JOB_PATH(j, argv[1], 1);
+    j->i1 = JS_ToBool(c, argv[2]);
+    j->i2 = JS_ToBool(c, argv[3]);
+    j->i3 = JS_ToBool(c, argv[4]);
+    j->run = run_cp;
+    return job_submit(c, j);
+}
+
 const JSCFunctionListEntry beyond_fs_functions[] = {
     JS_CFUNC_DEF("fsInit", 6, js_fs_init),
     JS_CFUNC_DEF("fsError", 5, js_fs_error),
@@ -3074,6 +4779,47 @@ const JSCFunctionListEntry beyond_fs_functions[] = {
     JS_CFUNC_DEF("fsWatchStart", 5, js_fs_watch_start),
     JS_CFUNC_DEF("fsWatchClose", 1, js_fs_watch_close),
     JS_CFUNC_DEF("fsWatchRef", 2, js_fs_watch_ref),
+    JS_CFUNC_DEF("fsPoolInit", 1, js_fs_pool_init),
+    JS_CFUNC_DEF("fsStatJob", 6, js_fs_stat_job),
+    JS_CFUNC_DEF("fsFstatJob", 4, js_fs_fstat_job),
+    JS_CFUNC_DEF("fsStatfsJob", 4, js_fs_statfs_job),
+    JS_CFUNC_DEF("fsOpenJob", 5, js_fs_open_job),
+    JS_CFUNC_DEF("fsCloseJob", 3, js_fs_close_job),
+    JS_CFUNC_MAGIC_DEF("fsReadJob", 7, js_fs_rw_job, 0),
+    JS_CFUNC_MAGIC_DEF("fsWriteJob", 7, js_fs_rw_job, 1),
+    JS_CFUNC_DEF("fsWriteStringJob", 5, js_fs_write_string_job),
+    JS_CFUNC_MAGIC_DEF("fsReadvJob", 5, js_fs_rwv_job, 0),
+    JS_CFUNC_MAGIC_DEF("fsWritevJob", 5, js_fs_rwv_job, 1),
+    JS_CFUNC_DEF("fsReadFileJob", 6, js_fs_read_file_job),
+    JS_CFUNC_DEF("fsWriteFileJob", 8, js_fs_write_file_job),
+    JS_CFUNC_DEF("fsAccessJob", 4, js_fs_access_job),
+    JS_CFUNC_DEF("fsExistsJob", 3, js_fs_exists_job),
+    JS_CFUNC_MAGIC_DEF("fsUnlinkJob", 3, js_fs_path_op_job, OP_UNLINK),
+    JS_CFUNC_MAGIC_DEF("fsRmdirJob", 3, js_fs_path_op_job, OP_RMDIR),
+    JS_CFUNC_MAGIC_DEF("fsChmodJob", 4, js_fs_path_op_job, OP_CHMOD),
+    JS_CFUNC_MAGIC_DEF("fsLchmodJob", 4, js_fs_path_op_job, OP_LCHMOD),
+    JS_CFUNC_MAGIC_DEF("fsChownJob", 5, js_fs_path_op_job, OP_CHOWN),
+    JS_CFUNC_MAGIC_DEF("fsLchownJob", 5, js_fs_path_op_job, OP_LCHOWN),
+    JS_CFUNC_MAGIC_DEF("fsTruncateJob", 4, js_fs_path_op_job, OP_TRUNCATE),
+    JS_CFUNC_MAGIC_DEF("fsFsyncJob", 3, js_fs_fd_op_job, OP_FSYNC),
+    JS_CFUNC_MAGIC_DEF("fsFdatasyncJob", 3, js_fs_fd_op_job, OP_FDATASYNC),
+    JS_CFUNC_MAGIC_DEF("fsFchmodJob", 4, js_fs_fd_op_job, OP_FCHMOD),
+    JS_CFUNC_MAGIC_DEF("fsFchownJob", 5, js_fs_fd_op_job, OP_FCHOWN),
+    JS_CFUNC_MAGIC_DEF("fsFtruncateJob", 4, js_fs_fd_op_job, OP_FTRUNCATE),
+    JS_CFUNC_MAGIC_DEF("fsRenameJob", 4, js_fs_two_paths_job, OP_RENAME),
+    JS_CFUNC_MAGIC_DEF("fsLinkJob", 4, js_fs_two_paths_job, OP_LINK),
+    JS_CFUNC_MAGIC_DEF("fsSymlinkJob", 4, js_fs_two_paths_job, OP_SYMLINK),
+    JS_CFUNC_MAGIC_DEF("fsUtimesJob", 8, js_fs_utimes_job, 0),
+    JS_CFUNC_MAGIC_DEF("fsFutimesJob", 7, js_fs_utimes_job, 1),
+    JS_CFUNC_DEF("fsReadlinkJob", 4, js_fs_readlink_job),
+    JS_CFUNC_DEF("fsRealpathJob", 5, js_fs_realpath_job),
+    JS_CFUNC_DEF("fsMkdirJob", 5, js_fs_mkdir_job),
+    JS_CFUNC_DEF("fsMkdtempJob", 4, js_fs_mkdtemp_job),
+    JS_CFUNC_DEF("fsReaddirJob", 6, js_fs_readdir_job),
+    JS_CFUNC_DEF("fsRmJob", 5, js_fs_rm_job),
+    JS_CFUNC_DEF("fsRmdirRecursiveJob", 3, js_fs_rmdir_recursive_job),
+    JS_CFUNC_DEF("fsCopyFileJob", 5, js_fs_copy_file_job),
+    JS_CFUNC_DEF("fsCpJob", 7, js_fs_cp_job),
 };
 
 const int beyond_fs_function_count = sizeof beyond_fs_functions / sizeof *beyond_fs_functions;
