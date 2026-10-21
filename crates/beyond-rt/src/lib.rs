@@ -33,6 +33,7 @@ unsafe extern "C" {
     fn beyond_loop_num_polls(loop_: *mut c_void) -> c_int;
     fn beyond_client_idle_count() -> c_int;
     fn beyond_spawn_unrefd() -> c_int;
+    fn beyond_fs_unrefd() -> c_int;
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
@@ -134,7 +135,8 @@ pub extern "C" fn beyond_rt_now_ms() -> f64 {
 pub extern "C" fn beyond_rt_alive() -> c_int {
     // SAFETY: uWebSockets' loop of this thread.
     let uloop = unsafe { uws_get_loop() };
-    let polls = unsafe { beyond_loop_num_polls(uloop) - beyond_client_idle_count() - beyond_spawn_unrefd() };
+    let polls =
+        unsafe { beyond_loop_num_polls(uloop) - beyond_client_idle_count() - beyond_spawn_unrefd() - beyond_fs_unrefd() };
     (polls > 0 || TIMERS.with_borrow(|t| t.refd())) as c_int
 }
 
@@ -192,10 +194,11 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         }
         // SAFETY: the loop is live.
         // (Idle keep-alive connections of fetch() do not keep it alive, nor
-        // the unreferenced children and pipes of Bun.spawn: those are still
+        // the unreferenced children and pipes of Bun.spawn, and fs.watch's
+        // unreferenced watchers: those are still
         // polled while something else does.)
         let all = unsafe { beyond_loop_num_polls(uloop) };
-        let polls = all - unsafe { beyond_client_idle_count() + beyond_spawn_unrefd() };
+        let polls = all - unsafe { beyond_client_idle_count() + beyond_spawn_unrefd() + beyond_fs_unrefd() };
         let (refd, next) = TIMERS.with_borrow_mut(|t| (t.refd(), t.next().map(|n| n.0)));
         if polls == 0 && !refd {
             return 0;

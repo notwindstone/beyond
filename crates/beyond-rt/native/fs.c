@@ -2530,6 +2530,13 @@ typedef struct {
 static Watch **watches;
 static int nwatches;
 
+// The loop's polls of fs.c that do not keep the program alive (they are
+// still polled while something else does): unreferenced watchers (the loop
+// leaves them out: src/lib.rs).
+static int fs_unrefd;
+
+int beyond_fs_unrefd(void) { return fs_unrefd; }
+
 static uint64_t watch_hash(const char *p, size_t n) {
     uint64_t h = 1469598103934665603ULL;
     for (size_t i = 0; i < n; i++)
@@ -2709,12 +2716,7 @@ static void watch_free(Watch *w) {
         free(w->wds[i].sub);
     free(w->wds);
     free(w->root);
-    struct us_loop_t *loop = uws_get_loop();
-    // (us_poll_free counts it off the loop's polls: an unreferenced one is
-    // not counted.)
-    if (!w->refd)
-        loop->num_polls++;
-    us_poll_free(&w->cb.p, loop);
+    us_poll_free(&w->cb.p, uws_get_loop());
 }
 
 // Stops watching: no event is handed over after this.
@@ -2722,6 +2724,10 @@ static void watch_stop(Watch *w) {
     if (w->closed)
         return;
     w->closed = 1;
+    if (!w->refd) {
+        w->refd = 1;
+        fs_unrefd--;
+    }
     us_poll_stop(&w->cb.p, uws_get_loop());
     close(w->ifd);
     w->ifd = -1;
@@ -2958,7 +2964,7 @@ static JSValue js_fs_watch_start(JSContext *c, JSValueConst this_val, int argc, 
     us_poll_start(&w->cb.p, loop, LIBUS_SOCKET_READABLE);
     if (!persistent) {
         w->refd = 0;
-        loop->num_polls--;
+        fs_unrefd++;
     }
     int id = 0;
     for (int i = 0; i < nwatches; i++)
@@ -3009,7 +3015,7 @@ static JSValue js_fs_watch_ref(JSContext *c, JSValueConst this_val, int argc, JS
     int ref = JS_ToBool(c, argv[1]);
     if (w && !w->closed && ref != w->refd) {
         w->refd = ref;
-        uws_get_loop()->num_polls += ref ? 1 : -1;
+        fs_unrefd += ref ? -1 : 1;
     }
     return JS_UNDEFINED;
 }
