@@ -3097,7 +3097,9 @@ static JSValue js_fs_jobs_pending(JSContext *c, JSValueConst this_val, int argc,
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <linux/futex.h>
 #include <sys/eventfd.h>
+#include <sys/syscall.h>
 
 void beyond_flush_stdout(void);
 
@@ -3141,22 +3143,37 @@ struct FsJob {
     char inline_path[2][192];
 };
 
-// The queue of jobs (an adaptive mutex: held for a few instructions, it
-// spins before sleeping), the threads that wait for one (`pool_idle`, and
-// of them the ones signaled that have not woken yet, `pool_wakes`), and
-// the jobs queued, which a thread looking for work reads without the lock.
-static pthread_mutex_t pool_lock;
-static pthread_cond_t pool_cond = PTHREAD_COND_INITIALIZER;
-static FsJob *pool_head, *pool_tail;
-static int pool_threads, pool_idle, pool_wakes, pool_max;
-static atomic_int pool_queued;
+// The queue of jobs: a ring the JavaScript thread puts jobs in and the
+// pool's threads take them from (without a lock), and the jobs it had no
+// room for, put in as it empties (the JavaScript thread's own).
+#define RING_SIZE 1024
+static _Atomic(FsJob *) ring[RING_SIZE];
+static _Atomic size_t ring_head, ring_tail;
+static FsJob *over_head, *over_tail;
 // The jobs done, newest first: pushed by the threads, taken all at once by
 // the JavaScript thread (without a lock).
 static _Atomic(FsJob *) done_head;
-// How long a thread out of work looks for more before sleeping (pauses):
-// a burst of calls queues the next one soon, and a sleeping thread takes
-// long to wake.
-#define POOL_SPIN 256
+// Whether the JavaScript thread is waiting on the loop (the eventfd is
+// written for a job done only then).
+static atomic_int js_parked;
+
+// The pool's threads wake as Bun's (its ThreadPool's Sync): one word holds
+// the threads asleep (`idle`), those started (`spawned`), whether there is
+// work no thread has been told of (`notified`), and whether a thread woken
+// for it is out (`state`): until that one finds a job (and wakes the next),
+// no other is, and a job queued meanwhile is only noted.
+#define SYNC_IDLE 0x3FFFu
+#define SYNC_SPAWNED_ONE (1u << 14)
+#define SYNC_SPAWNED(s) (((s) >> 14) & 0x3FFFu)
+#define SYNC_NOTIFIED (1u << 29)
+#define SYNC_STATE(s) ((s) >> 30)
+#define SYNC_WITH(s, st) (((s) & ~(3u << 30)) | ((uint32_t)(st) << 30))
+enum { SYNC_PENDING, SYNC_SIGNALED, SYNC_WAKING };
+static _Atomic uint32_t pool_sync;
+static uint32_t pool_max;
+// What the threads asleep wait on (Bun's Event: one token).
+enum { EV_EMPTY, EV_WAITING, EV_NOTIFIED };
+static _Atomic uint32_t pool_event;
 
 static inline void cpu_relax(void) {
 #if defined(__x86_64__) || defined(__i386__)
@@ -3165,6 +3182,7 @@ static inline void cpu_relax(void) {
     __asm__ __volatile__("yield");
 #endif
 }
+
 static int pool_efd = -1;
 static struct us_internal_callback_t *pool_poll;
 static FsJob *live; // (JavaScript thread)
@@ -3181,43 +3199,168 @@ static void pool_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
     }
 }
 
-// The next job of the queue (pool_lock held), or NULL.
-static FsJob *pool_take(void) {
-    FsJob *j = pool_head;
-    if (j) {
-        pool_head = j->next;
-        if (!pool_head)
-            pool_tail = NULL;
-        atomic_fetch_sub_explicit(&pool_queued, 1, memory_order_relaxed);
+// Puts the job in the ring (JavaScript thread): 0 when it is full.
+static int ring_put(FsJob *j) {
+    size_t t = atomic_load_explicit(&ring_tail, memory_order_relaxed);
+    if (t - atomic_load_explicit(&ring_head, memory_order_acquire) >= RING_SIZE)
+        return 0;
+    atomic_store_explicit(&ring[t % RING_SIZE], j, memory_order_relaxed);
+    atomic_store_explicit(&ring_tail, t + 1, memory_order_release);
+    return 1;
+}
+
+// The next job of the ring, or NULL.
+static FsJob *ring_take(void) {
+    size_t h = atomic_load_explicit(&ring_head, memory_order_acquire);
+    for (;;) {
+        if (h == atomic_load_explicit(&ring_tail, memory_order_acquire))
+            return NULL;
+        FsJob *j = atomic_load_explicit(&ring[h % RING_SIZE], memory_order_relaxed);
+        if (atomic_compare_exchange_weak_explicit(&ring_head, &h, h + 1, memory_order_acq_rel, memory_order_acquire))
+            return j;
     }
-    return j;
+}
+
+static void futex_wait(_Atomic uint32_t *w, uint32_t v) {
+    syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, v, NULL, NULL, 0);
+}
+
+static void futex_wake(_Atomic uint32_t *w, int n) {
+    syscall(SYS_futex, w, FUTEX_WAKE_PRIVATE, n, NULL, NULL, 0);
+}
+
+// Waits for the event's token, and takes it.
+static void event_wait(void) {
+    uint32_t with = EV_EMPTY;
+    uint32_t s = atomic_load_explicit(&pool_event, memory_order_relaxed);
+    for (;;) {
+        if (s == EV_NOTIFIED) {
+            if (atomic_compare_exchange_weak_explicit(&pool_event, &s, with, memory_order_acquire, memory_order_relaxed))
+                return;
+            continue;
+        }
+        if (s != EV_WAITING &&
+            !atomic_compare_exchange_weak_explicit(&pool_event, &s, EV_WAITING, memory_order_relaxed, memory_order_relaxed))
+            continue;
+        futex_wait(&pool_event, EV_WAITING);
+        s = atomic_load_explicit(&pool_event, memory_order_relaxed);
+        // (Others may sleep still: the next token wakes one of them.)
+        with = EV_WAITING;
+    }
+}
+
+// Posts the token, waking a thread that waits.
+static void event_notify(void) {
+    if (atomic_exchange_explicit(&pool_event, EV_NOTIFIED, memory_order_release) == EV_WAITING)
+        futex_wake(&pool_event, 1);
+}
+
+static void *pool_main(void *arg);
+
+static void pool_spawn(void) {
+    pthread_t t;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_attr_setstacksize(&attr, 512 * 1024);
+    int failed = pthread_create(&t, &attr, pool_main, NULL);
+    pthread_attr_destroy(&attr);
+    if (failed) {
+        // (Not started: the next job tries again.)
+        uint32_t s = atomic_load_explicit(&pool_sync, memory_order_relaxed), n;
+        do
+            n = SYNC_WITH(s - SYNC_SPAWNED_ONE, SYNC_PENDING);
+        while (!atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_relaxed, memory_order_relaxed));
+    }
+}
+
+// Tells the pool of work: wakes a thread asleep, or starts one, unless one
+// woken is out already (`is_waking`: that thread, passing the waking on).
+static void pool_notify_slow(int is_waking) {
+    uint32_t s = atomic_load_explicit(&pool_sync, memory_order_relaxed);
+    for (;;) {
+        int can_wake = is_waking || SYNC_STATE(s) == SYNC_PENDING;
+        int wake = 0, spawn = 0;
+        uint32_t n = s | SYNC_NOTIFIED;
+        if (can_wake && (s & SYNC_IDLE) > 0) {
+            n = SYNC_WITH(n, SYNC_SIGNALED);
+            wake = 1;
+        } else if (can_wake && SYNC_SPAWNED(s) < pool_max) {
+            n = SYNC_WITH(n, SYNC_SIGNALED) + SYNC_SPAWNED_ONE;
+            spawn = 1;
+        } else if (is_waking) {
+            n = SYNC_WITH(n, SYNC_PENDING);
+        } else if (s & SYNC_NOTIFIED) {
+            return;
+        }
+        if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_release, memory_order_relaxed)) {
+            if (wake)
+                event_notify();
+            else if (spawn)
+                pool_spawn();
+            return;
+        }
+    }
+}
+
+static inline void pool_notify(int is_waking) {
+    // (A read-modify-write, so that a thread taking the notification sees
+    // the job queued before it.)
+    if (!is_waking && atomic_fetch_or_explicit(&pool_sync, 0, memory_order_release) & SYNC_NOTIFIED)
+        return;
+    pool_notify_slow(is_waking);
+}
+
+// Takes a notification, or sleeps until one: whether this thread is the
+// one woken (to wake the next once it finds a job).
+static int pool_wait(int is_waking) {
+    int is_idle = 0;
+    uint32_t s = atomic_load_explicit(&pool_sync, memory_order_relaxed);
+    for (;;) {
+        if (s & SYNC_NOTIFIED) {
+            uint32_t n = s & ~SYNC_NOTIFIED;
+            if (is_idle)
+                n -= 1;
+            if (SYNC_STATE(s) == SYNC_SIGNALED)
+                n = SYNC_WITH(n, SYNC_WAKING);
+            if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_acquire, memory_order_relaxed))
+                return is_waking || SYNC_STATE(s) == SYNC_SIGNALED;
+        } else if (!is_idle) {
+            uint32_t n = s + 1;
+            if (is_waking)
+                n = SYNC_WITH(n, SYNC_PENDING);
+            if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_relaxed, memory_order_relaxed)) {
+                is_waking = 0;
+                is_idle = 1;
+            }
+        } else {
+            event_wait();
+            s = atomic_load_explicit(&pool_sync, memory_order_relaxed);
+        }
+    }
 }
 
 static void *pool_main(void *arg) {
     (void)arg;
+    int is_waking = 0;
     for (;;) {
-        for (int i = 0; i < POOL_SPIN && atomic_load_explicit(&pool_queued, memory_order_relaxed) == 0; i++)
-            cpu_relax();
-        pthread_mutex_lock(&pool_lock);
+        is_waking = pool_wait(is_waking);
         FsJob *j;
-        while (!(j = pool_take())) {
-            pool_idle++;
-            pthread_cond_wait(&pool_cond, &pool_lock);
-            pool_idle--;
-            if (pool_wakes > 0)
-                pool_wakes--;
-        }
-        pthread_mutex_unlock(&pool_lock);
-        if (!j->no)
-            j->run(j);
-        FsJob *old = atomic_load_explicit(&done_head, memory_order_relaxed);
-        do
-            j->next = old;
-        while (!atomic_compare_exchange_weak_explicit(&done_head, &old, j, memory_order_release, memory_order_relaxed));
-        if (!old) {
-            uint64_t one = 1;
-            while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
-                ;
+        while ((j = ring_take())) {
+            if (is_waking)
+                pool_notify(1);
+            is_waking = 0;
+            if (!j->no)
+                j->run(j);
+            FsJob *old = atomic_load_explicit(&done_head, memory_order_relaxed);
+            do
+                j->next = old;
+            while (!atomic_compare_exchange_weak_explicit(&done_head, &old, j, memory_order_seq_cst, memory_order_relaxed));
+            if (atomic_load_explicit(&js_parked, memory_order_seq_cst) && atomic_exchange_explicit(&js_parked, 0, memory_order_relaxed)) {
+                uint64_t one = 1;
+                while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
+                    ;
+            }
         }
     }
     return NULL;
@@ -3228,11 +3371,6 @@ static void pool_on_ready(struct us_internal_callback_t *cb);
 static int pool_start(void) {
     if (pool_poll)
         return 0;
-    pthread_mutexattr_t ma;
-    pthread_mutexattr_init(&ma);
-    pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_ADAPTIVE_NP);
-    pthread_mutex_init(&pool_lock, &ma);
-    pthread_mutexattr_destroy(&ma);
     pool_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (pool_efd < 0)
         return -1;
@@ -3251,8 +3389,20 @@ static int pool_start(void) {
     us_poll_start(&pool_poll->p, loop, LIBUS_SOCKET_READABLE);
     // (It keeps the program alive while jobs are out.)
     fs_unrefd++;
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    pool_max = n < 2 ? 2 : n > 64 ? 64 : (int)n;
+    // As many threads as processors, or UV_THREADPOOL_SIZE's or GOMAXPROCS's
+    // (Bun's thread count).
+    long n = 0;
+    const char *keys[] = {"UV_THREADPOOL_SIZE", "GOMAXPROCS"};
+    for (int i = 0; i < 2 && !n; i++) {
+        const char *v = getenv(keys[i]);
+        char *end;
+        long k = v ? strtol(v, &end, 10) : 0;
+        if (v && end != v && k >= 2)
+            n = k;
+    }
+    if (!n)
+        n = sysconf(_SC_NPROCESSORS_ONLN);
+    pool_max = n < 2 ? 2 : n > 1024 ? 1024 : (uint32_t)n;
     return 0;
 }
 
@@ -3372,6 +3522,17 @@ static JSValue job_error(JSContext *c, FsJob *j) {
                     (j->err_what & JERR_DEST) ? &ed : NULL, (j->err_what & JERR_FD) ? j->err_fd : -1, j->err_flags);
 }
 
+// Moves the jobs the ring had no room for into it (JavaScript thread).
+static void pool_refill(void) {
+    while (over_head) {
+        FsJob *next = over_head->next;
+        if (!ring_put(over_head))
+            return;
+        over_head = next;
+    }
+    over_tail = NULL;
+}
+
 // Hands the job to the pool: JS_TRUE (the binding's: it is queued).
 static JSValue job_submit(JSContext *c, FsJob *j) {
     if (pool_start() < 0) {
@@ -3385,30 +3546,17 @@ static JSValue job_submit(JSContext *c, FsJob *j) {
     live = j;
     if (inflight++ == 0)
         fs_unrefd--;
-    pthread_mutex_lock(&pool_lock);
     j->next = NULL;
-    if (pool_tail)
-        pool_tail->next = j;
-    else
-        pool_head = j;
-    pool_tail = j;
-    atomic_fetch_add_explicit(&pool_queued, 1, memory_order_relaxed);
-    // (A sleeping thread not signaled yet is woken; else, a thread more,
-    // up to pool_max; those looking for work take it.)
-    if (pool_idle > pool_wakes) {
-        pool_wakes++;
-        pthread_cond_signal(&pool_cond);
-    } else if (pool_threads < pool_max) {
-        pthread_t t;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        pthread_attr_setstacksize(&attr, 512 * 1024);
-        if (pthread_create(&t, &attr, pool_main, NULL) == 0)
-            pool_threads++;
-        pthread_attr_destroy(&attr);
+    if (over_head)
+        pool_refill();
+    if (over_head || !ring_put(j)) {
+        if (over_tail)
+            over_tail->next = j;
+        else
+            over_head = j;
+        over_tail = j;
     }
-    pthread_mutex_unlock(&pool_lock);
+    pool_notify(0);
     return JS_TRUE;
 }
 
@@ -3486,6 +3634,10 @@ static int pool_finish_done(void) {
             job_finish(c, j);
             n++;
         }
+        if (over_head) {
+            pool_refill();
+            pool_notify(0);
+        }
     }
 }
 
@@ -3500,10 +3652,12 @@ static void pool_on_ready(struct us_internal_callback_t *cb) {
 // Before the event loop waits: while jobs are out, up to `spin_us`
 // microseconds for one to be done, which is then finished without the
 // loop sleeping (a thread's job of a few microseconds is done before the
-// loop would be woken for it). How many were finished.
+// loop would be woken for it); else the threads are told to wake the loop.
+// How many were finished.
 int beyond_fs_before_wait(int spin_us) {
     if (inflight == 0)
         return 0;
+    atomic_store_explicit(&js_parked, 0, memory_order_relaxed);
     if (!atomic_load_explicit(&done_head, memory_order_relaxed)) {
         struct timespec t0, t;
         clock_gettime(CLOCK_MONOTONIC, &t0);
@@ -3513,13 +3667,18 @@ int beyond_fs_before_wait(int spin_us) {
                 break;
             if ((i & 63) == 63) {
                 clock_gettime(CLOCK_MONOTONIC, &t);
-                if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > spin_us * 1000L)
-                    return 0;
+                if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > spin_us * 1000L) {
+                    atomic_store_explicit(&js_parked, 1, memory_order_seq_cst);
+                    if (!atomic_load_explicit(&done_head, memory_order_seq_cst))
+                        return 0;
+                    // (A thread may write the eventfd still: the loop then
+                    // finds nothing done.)
+                    atomic_store_explicit(&js_parked, 0, memory_order_relaxed);
+                    break;
+                }
             }
         }
     }
-    uint64_t v;
-    (void)!read(pool_efd, &v, sizeof v);
     return pool_finish_done();
 }
 
