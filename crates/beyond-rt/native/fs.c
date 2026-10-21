@@ -264,9 +264,29 @@ typedef struct {
 #define PATH_EXCEPTION -1
 #define PATH_NUL 1
 
+static int is_ascii(const uint8_t *p, size_t len);
+
 static int get_path(JSContext *c, JSValueConst v, Path *p) {
     p->js = v;
     p->cstr = NULL;
+    size_t n8;
+    const uint8_t *s8 = JS_GetStringLatin1(v, &n8);
+    // (An ASCII string's characters are its UTF-8 bytes: copied here,
+    // without the engine's conversion and its allocation.)
+    if (s8 && n8 < sizeof p->buf && is_ascii(s8, n8)) {
+        if (memchr(s8, 0, n8))
+            return PATH_NUL;
+        memcpy(p->buf, s8, n8);
+        p->buf[n8] = 0;
+        p->p = p->buf;
+        p->len = n8;
+        if (n8 >= FS_PATH_MAX) {
+            ErrPath ep = {p->p, p->len, p->js};
+            throw_sys(c, ENAMETOOLONG, "open", &ep, NULL, -1, ERR_NO_SYSCALL_PROP);
+            return PATH_EXCEPTION;
+        }
+        return PATH_OK;
+    }
     if (JS_IsString(v)) {
         size_t len;
         const char *s = JS_ToCStringLen(c, &len, v);
