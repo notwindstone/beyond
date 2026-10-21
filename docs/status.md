@@ -149,18 +149,33 @@ ports), so name the modules to convert again): Bun's
 `native/buffer.c`, `fs.c`, `spawn.c`, `node.c`); a native not ported yet
 throws `ERR_NOT_IMPLEMENTED` when called. Ported natively so far:
 `node:buffer` (Node's `lib/buffer.js` on JSBuffer's natives),
-`string_decoder`, `node:fs` (every call, Bun's errors, `fs.watch` on
-inotify; async calls run synchronously and settle later),
+`string_decoder`, `node:fs` and `node:fs/promises` (every export, with
+Bun's names and errors: `fs.watch` on inotify, `watchFile`, `Dir` and
+`opendir`, `cp`, `glob`, `statfs`, `openAsBlob`, streams, `FileHandle`'s
+`readLines`, `readableWebStream` and streams; the callback and promise
+forms run their system calls on a pool of C threads and settle from the
+event loop, as Bun's work pool does), `node:os`,
 `Bun.spawn`/`spawnSync` (so `node:child_process`), `performance` and
 `PerformanceObserver`, `setImmediate`, `MessageChannel`/`BroadcastChannel`
 (in one thread), `util.isDeepStrictEqual`, `process.binding`.
 
 `crates/beyond/tests/nodejs` runs Node's tests as Bun keeps them
 (`test/js/node/test/parallel`): build `runner.ts` with `beyond build
---no-native`, then `run.py RUNNER [FILTER...]`. Of 3661: about 700 pass
-(child_process 56 of 102, buffer 48 of 63, fs 195 of 336); most failures
-are modules whose natives are not ported (http, net, dns, tls, zlib, vm,
-crypto, worker threads).
+--no-native` (or without it: natively compiled), then `run.py RUNNER
+[FILTER...]` (run from Bun's repository root, with the flags a test's
+header asks for, as Bun's runner does). Of 3661: about 700 pass
+(child_process 56 of 102, buffer 48 of 63, counted before the fs work);
+`test-fs-*`: 316 of 336 pass and 12 skip themselves (Windows only, run as
+root, Temporal, a buffer of more than 2^31 - 1 bytes), interpreted and
+natively compiled alike. The 8 others need what is not ported yet: a
+`net.Server` on a Unix socket (`Bun.listen`: `test-fs-cp-async-socket`,
+`test-fs-cp-sync-copy-socket-error`, `test-fs-readdir-recursive`), zlib's
+native gzip (`stream/iter`: `test-fs-promises-file-handle-pull`,
+`-pullsync`, `-writer`), Worker threads
+(`test-fs-promises-file-handle-read-worker`), and async stack traces
+(`test-fs-promises`, which checks for `at async` frames). Most other
+failures are modules whose natives are not ported (http, net, dns, tls,
+zlib, vm, crypto, worker threads).
 ## Tests
 
 The tests (`cargo test`) run programs whose output must be Bun 1.4.3's, the WPT
