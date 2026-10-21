@@ -427,6 +427,15 @@ function asyncWrap(fn: any, name: string) {
   class FileHandle extends EventEmitter {
     constructor(fd, flag, path?: string) {
       super();
+      // (Beyond: the fields `[kCloseResolve]; [kFd]; [kFlag]; [kClosePromise];
+      // [kRefs];` defined here, in their order, as the class would define
+      // them: Luminous compiles no computed field names of a class inside a
+      // block.)
+      Object.defineProperty(this, kCloseResolve, { value: undefined, writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(this, kFd, { value: undefined, writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(this, kFlag, { value: undefined, writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(this, kClosePromise, { value: undefined, writable: true, enumerable: true, configurable: true });
+      Object.defineProperty(this, kRefs, { value: undefined, writable: true, enumerable: true, configurable: true });
       this[kFd] = fd ? fd : -1;
       this[kRefs] = 1;
       this[kClosePromise] = null;
@@ -444,11 +453,7 @@ function asyncWrap(fn: any, name: string) {
       return this[kFd];
     }
 
-    [kCloseResolve];
-    [kFd];
-    [kFlag];
-    [kClosePromise];
-    [kRefs];
+    // (Beyond: the fields are defined by the constructor.)
     // needs to exist for https://github.com/nodejs/node/blob/8641d941893/test/parallel/test-worker-message-port-transfer-fake-js-transferable.js to pass
     [Symbol("messaging_transfer_symbol")]() {}
 
