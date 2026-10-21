@@ -166,8 +166,7 @@ await ta("p filehandle", async () => {
   r.push(fs.readFileSync(W + "/fh", "utf8"));
   return r;
 });
-// (readline needs setImmediate, which Beyond lacks)
-if (0) await ta("p filehandle readLines/stream", async () => {
+await ta("p filehandle readLines/stream", async () => {
   fs.writeFileSync(W + "/lines", "one\ntwo\nthree\n");
   const fh = await fsp.open(W + "/lines");
   const out = [];
