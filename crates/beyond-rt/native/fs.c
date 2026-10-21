@@ -3096,6 +3096,7 @@ static JSValue js_fs_jobs_pending(JSContext *c, JSValueConst this_val, int argc,
 // the jobs (microtasks) those queued run before the next one finishes.
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/eventfd.h>
 
 void beyond_flush_stdout(void);
@@ -3140,12 +3141,30 @@ struct FsJob {
     char inline_path[2][192];
 };
 
-static pthread_mutex_t pool_lock = PTHREAD_MUTEX_INITIALIZER;
+// The queue of jobs (an adaptive mutex: held for a few instructions, it
+// spins before sleeping), the threads that wait for one (`pool_idle`, and
+// of them the ones signaled that have not woken yet, `pool_wakes`), and
+// the jobs queued, which a thread looking for work reads without the lock.
+static pthread_mutex_t pool_lock;
 static pthread_cond_t pool_cond = PTHREAD_COND_INITIALIZER;
 static FsJob *pool_head, *pool_tail;
-static int pool_threads, pool_idle, pool_max;
-static pthread_mutex_t done_lock = PTHREAD_MUTEX_INITIALIZER;
-static FsJob *done_head;
+static int pool_threads, pool_idle, pool_wakes, pool_max;
+static atomic_int pool_queued;
+// The jobs done, newest first: pushed by the threads, taken all at once by
+// the JavaScript thread (without a lock).
+static _Atomic(FsJob *) done_head;
+// How long a thread out of work looks for more before sleeping (pauses):
+// a burst of calls queues the next one soon, and a sleeping thread takes
+// long to wake.
+#define POOL_SPIN 256
+
+static inline void cpu_relax(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
 static int pool_efd = -1;
 static struct us_internal_callback_t *pool_poll;
 static FsJob *live; // (JavaScript thread)
@@ -3162,33 +3181,44 @@ static void pool_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
     }
 }
 
-static void *pool_main(void *arg) {
-    (void)arg;
-    pthread_mutex_lock(&pool_lock);
-    for (;;) {
-        while (!pool_head) {
-            pool_idle++;
-            pthread_cond_wait(&pool_cond, &pool_lock);
-            pool_idle--;
-        }
-        FsJob *j = pool_head;
+// The next job of the queue (pool_lock held), or NULL.
+static FsJob *pool_take(void) {
+    FsJob *j = pool_head;
+    if (j) {
         pool_head = j->next;
         if (!pool_head)
             pool_tail = NULL;
+        atomic_fetch_sub_explicit(&pool_queued, 1, memory_order_relaxed);
+    }
+    return j;
+}
+
+static void *pool_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        for (int i = 0; i < POOL_SPIN && atomic_load_explicit(&pool_queued, memory_order_relaxed) == 0; i++)
+            cpu_relax();
+        pthread_mutex_lock(&pool_lock);
+        FsJob *j;
+        while (!(j = pool_take())) {
+            pool_idle++;
+            pthread_cond_wait(&pool_cond, &pool_lock);
+            pool_idle--;
+            if (pool_wakes > 0)
+                pool_wakes--;
+        }
         pthread_mutex_unlock(&pool_lock);
         if (!j->no)
             j->run(j);
-        pthread_mutex_lock(&done_lock);
-        int first = done_head == NULL;
-        j->next = done_head;
-        done_head = j;
-        pthread_mutex_unlock(&done_lock);
-        if (first) {
+        FsJob *old = atomic_load_explicit(&done_head, memory_order_relaxed);
+        do
+            j->next = old;
+        while (!atomic_compare_exchange_weak_explicit(&done_head, &old, j, memory_order_release, memory_order_relaxed));
+        if (!old) {
             uint64_t one = 1;
             while (write(pool_efd, &one, sizeof one) < 0 && errno == EINTR)
                 ;
         }
-        pthread_mutex_lock(&pool_lock);
     }
     return NULL;
 }
@@ -3198,6 +3228,11 @@ static void pool_on_ready(struct us_internal_callback_t *cb);
 static int pool_start(void) {
     if (pool_poll)
         return 0;
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_ADAPTIVE_NP);
+    pthread_mutex_init(&pool_lock, &ma);
+    pthread_mutexattr_destroy(&ma);
     pool_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (pool_efd < 0)
         return -1;
@@ -3357,7 +3392,11 @@ static JSValue job_submit(JSContext *c, FsJob *j) {
     else
         pool_head = j;
     pool_tail = j;
-    if (pool_idle > 0) {
+    atomic_fetch_add_explicit(&pool_queued, 1, memory_order_relaxed);
+    // (A sleeping thread not signaled yet is woken; else, a thread more,
+    // up to pool_max; those looking for work take it.)
+    if (pool_idle > pool_wakes) {
+        pool_wakes++;
         pthread_cond_signal(&pool_cond);
     } else if (pool_threads < pool_max) {
         pthread_t t;
@@ -3425,29 +3464,63 @@ static void job_finish(JSContext *c, FsJob *j) {
         beyond_js_report();
 }
 
+// Finishes the jobs done (in the order they were done), and those done
+// meanwhile; how many.
+static int pool_finish_done(void) {
+    int n = 0;
+    JSContext *c = beyond_js_context();
+    for (;;) {
+        FsJob *list = atomic_exchange_explicit(&done_head, NULL, memory_order_acquire);
+        if (!list)
+            return n;
+        FsJob *rev = NULL;
+        while (list) {
+            FsJob *next = list->next;
+            list->next = rev;
+            rev = list;
+            list = next;
+        }
+        while (rev) {
+            FsJob *j = rev;
+            rev = j->next;
+            job_finish(c, j);
+            n++;
+        }
+    }
+}
+
 static void pool_on_ready(struct us_internal_callback_t *cb) {
     (void)cb;
     uint64_t v;
     while (read(pool_efd, &v, sizeof v) < 0 && errno == EINTR)
         ;
-    pthread_mutex_lock(&done_lock);
-    FsJob *list = done_head;
-    done_head = NULL;
-    pthread_mutex_unlock(&done_lock);
-    // (In the order they were done.)
-    FsJob *rev = NULL;
-    while (list) {
-        FsJob *n = list->next;
-        list->next = rev;
-        rev = list;
-        list = n;
+    pool_finish_done();
+}
+
+// Before the event loop waits: while jobs are out, up to `spin_us`
+// microseconds for one to be done, which is then finished without the
+// loop sleeping (a thread's job of a few microseconds is done before the
+// loop would be woken for it). How many were finished.
+int beyond_fs_before_wait(int spin_us) {
+    if (inflight == 0)
+        return 0;
+    if (!atomic_load_explicit(&done_head, memory_order_relaxed)) {
+        struct timespec t0, t;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int i = 0;; i++) {
+            cpu_relax();
+            if (atomic_load_explicit(&done_head, memory_order_relaxed))
+                break;
+            if ((i & 63) == 63) {
+                clock_gettime(CLOCK_MONOTONIC, &t);
+                if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > spin_us * 1000L)
+                    return 0;
+            }
+        }
     }
-    JSContext *c = beyond_js_context();
-    while (rev) {
-        FsJob *j = rev;
-        rev = j->next;
-        job_finish(c, j);
-    }
+    uint64_t v;
+    (void)!read(pool_efd, &v, sizeof v);
+    return pool_finish_done();
 }
 
 // fsPoolInit(abortError): the AbortError of an aborted signal's reason.

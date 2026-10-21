@@ -34,6 +34,7 @@ unsafe extern "C" {
     fn beyond_client_idle_count() -> c_int;
     fn beyond_spawn_unrefd() -> c_int;
     fn beyond_fs_unrefd() -> c_int;
+    fn beyond_fs_before_wait(spin_us: c_int) -> c_int;
     fn beyond_js_run_jobs() -> c_int;
     fn beyond_js_fire_timer(id: u32) -> c_int;
     fn beyond_js_uncaught() -> c_int;
@@ -91,6 +92,10 @@ impl Timers {
 thread_local! {
     static TIMERS: RefCell<Timers> = RefCell::new(Timers::default());
 }
+
+/// How long the loop waits for the fs thread pool's jobs out before
+/// sleeping (µs): a job of a few µs is done before the loop would be woken.
+const FS_SPIN_US: c_int = 50;
 
 /// A delay as timers take it: at least 1 ms (as Node's and Bun's).
 fn delay_ns(ms: f64) -> u64 {
@@ -202,6 +207,11 @@ pub extern "C" fn beyond_rt_loop() -> c_int {
         let (refd, next) = TIMERS.with_borrow_mut(|t| (t.refd(), t.next().map(|n| n.0)));
         if polls == 0 && !refd {
             return 0;
+        }
+        // (fs jobs about to be done: finished without waiting.)
+        // SAFETY: the JavaScript thread, between turns.
+        if unsafe { beyond_fs_before_wait(FS_SPIN_US) } > 0 {
+            continue;
         }
         // (What the console wrote, before waiting.)
         // SAFETY: plain C stdio.
