@@ -25,7 +25,7 @@
  *
  * Modifications were made to the original code.
  */
-import __fs_promises from "node:fs/promises";
+import { getPromisesData } from "node:internal/fs/private";
 import __internal_primordials from "node:internal/primordials";
 import __internal_quic_binding from "node:internal/quic/binding";
 import __net from "node:net";
@@ -189,7 +189,8 @@ function getKeyObjectType(key) {
   return key.type;
 }
 
-const FileHandleImpl = __fs_promises.$data.FileHandle;
+// (Beyond: node:fs/promises' `$data`, a private name in Bun.)
+const FileHandleImpl = getPromisesData().FileHandle;
 const kFileLocked = Symbol("kFileLocked");
 const kFileHandle = Symbol("kFileHandle");
 Object.defineProperty(FileHandleImpl.prototype, kFileHandle, {

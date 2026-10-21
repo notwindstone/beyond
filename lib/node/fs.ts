@@ -17,6 +17,7 @@ const isDate = types.isDate;
 
 // The native `node:fs` binding, shared via `internal/fs/binding`.
 import fs from "node:internal/fs/binding";
+import { setOnStreamsReady } from "node:internal/fs/private";
 // (Beyond: imported, not required when first used: the module's exports
 // below read `promises` as it is evaluated, which, when a program imports
 // node:fs/promises too, would find that module not yet evaluated.)
@@ -1523,7 +1524,7 @@ const __export_R_OK = exports.R_OK;
 const __export_W_OK = exports.W_OK;
 // (Beyond: the stream classes are read now, unless node:internal/fs/streams,
 // which imports this module, is what is being evaluated: it calls
-// __streamsReady once it is.)
+// streamsReady of node:internal/fs/private once it is.)
 let __export_FileReadStream, __export_FileWriteStream, __export_ReadStream, __export_Utf8Stream, __export_WriteStream;
 function readStreamExports() {
   __export_ReadStream = exports.ReadStream;
@@ -1535,9 +1536,7 @@ function readStreamExports() {
 try {
   readStreamExports();
 } catch {}
-export function __streamsReady() {
-  readStreamExports();
-}
+setOnStreamsReady(readStreamExports);
 const __export_X_OK = exports.X_OK;
 const __export_promises = exports.promises;
 export { __export_F_OK as F_OK, __export_FileReadStream as FileReadStream, __export_FileWriteStream as FileWriteStream, __export_R_OK as R_OK, __export_ReadStream as ReadStream, __export_Utf8Stream as Utf8Stream, __export_W_OK as W_OK, __export_WriteStream as WriteStream, __export_X_OK as X_OK, __export_promises as promises };

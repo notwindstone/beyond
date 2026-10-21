@@ -1,4 +1,5 @@
 import { setImmediate } from "beyond:timers";
+import { getPromisesData } from "node:internal/fs/private";
 import __internal_primordials from "node:internal/primordials";
 import __path from "node:path";
 import { Blob } from "beyond:blob";
@@ -385,7 +386,8 @@ function deserializeJSTransferable(marker: Record<string, any>): unknown {
   const deserializeInfo = marker[kJSTransferableMarker];
   switch (deserializeInfo) {
     case "internal/fs/promises:FileHandle": {
-      const { FileHandle, kDeserialize } = import.meta.require("node:fs").default.promises.$data;
+      // (Beyond: node:fs/promises' `$data`, a private name in Bun.)
+      const { FileHandle, kDeserialize } = getPromisesData();
       const handle = new FileHandle(-1);
       handle[kDeserialize](marker.data);
       return handle;
@@ -467,7 +469,7 @@ function packJSTransferables(options: NodeWorkerOptions): NodeWorkerOptions {
   }
   if (!hasCandidate) return options;
 
-  const { kTransfer, kTransferList, kDeserialize } = import.meta.require("node:fs").default.promises.$data;
+  const { kTransfer, kTransferList, kDeserialize } = getPromisesData();
   let replacements: Map<object, object> | undefined;
   const nativeTransferList: unknown[] = [];
   // kTransfer() neuters the handle (extracts the bare fd); if anything later

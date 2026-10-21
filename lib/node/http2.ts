@@ -44,8 +44,9 @@ const { kTimeout, getTimerDuration } = __internal_timers;
 import tls from "node:tls";
 import net from "node:net";
 import fs from "node:fs";
-import { $data } from "node:fs/promises";
-const FileHandle = $data.FileHandle;
+// (Beyond: node:fs/promises' `$data`, a private name in Bun.)
+import { getPromisesData } from "node:internal/fs/private";
+const FileHandle = getPromisesData().FileHandle;
 const bunSocketServerOptions = Symbol.for("::bunnetserveroptions::");
 const kInfoHeaders = Symbol("sent-info-headers");
 const kStrictSingleValueFields = Symbol("strictSingleValueFields");

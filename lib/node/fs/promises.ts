@@ -8,6 +8,8 @@ import { $ERR_INTERNAL_ASSERTION, $ERR_INVALID_ARG_TYPE, $ERR_INVALID_STATE, $ER
 import types from "node:util/types";
 import EventEmitter from "node:events";
 import fs from "node:internal/fs/binding";
+// (Beyond: `$data`, a private name in Bun, through an internal module.)
+import { setPromisesData } from "node:internal/fs/private";
 import { validateInteger, validateBoolean, validateObject, validateAbortSignal, validateEncoding } from "node:internal/validators";
 
 const constants = $processBindingConstants.fs;
@@ -236,6 +238,7 @@ const private_symbols = {
   kDeserialize,
   FileHandle: null as any,
 };
+setPromisesData(private_symbols);
 
 const _readFile = fs.readFile.bind(fs);
 const _writeFile = fs.writeFile.bind(fs);
@@ -386,9 +389,6 @@ const exports = {
   watch,
   opendir,
 
-  // "$data" is reuse of private symbol
-  // this is used to export the private symbols to internal/fs/streams and node:http2 without making them public.
-  $data: private_symbols,
 };
 export default exports;
 
@@ -1682,7 +1682,7 @@ async function writeFileAsyncIterator(fdOrPath, iterable, optionsOrEncoding, fla
   }
 }
 
-export { cp, glob, constants, watch, opendir, private_symbols as $data };
+export { cp, glob, constants, watch, opendir };
 const __export_access = exports.access;
 const __export_appendFile = exports.appendFile;
 const __export_chmod = exports.chmod;
