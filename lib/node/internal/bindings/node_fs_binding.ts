@@ -585,6 +585,61 @@ function runAsync(fn: Function, args: any[]): Promise<any> {
   return p;
 }
 
+/** runAsync of `fn(a, b, c, d, e, f)`. */
+function runAsync6(fn: Function, a: any, b: any, c: any, d: any, e: any, f: any): Promise<any> {
+  phase = 0;
+  asyncCall = true;
+  callSignal = undefined;
+  const p = promiseNew();
+  jobKind = false;
+  jobTarget = p;
+  let value: any;
+  try {
+    value = fn(a, b, c, d, e, f);
+  } catch (err) {
+    asyncCall = false;
+    callSignal = undefined;
+    jobTarget = undefined;
+    if (phase === 0) throw err;
+    phase = 0;
+    complete(0, p, err, true);
+    return p;
+  }
+  asyncCall = false;
+  phase = 0;
+  jobTarget = undefined;
+  if (value !== JOB) complete(0, p, value, false, callSignal);
+  callSignal = undefined;
+  return p;
+}
+
+/** runCallback of `fn(a, b, c, d, e, f)`. */
+function runCallback6(fn: Function, callback: any, a: any, b: any, c: any, d: any, e: any, f: any): void {
+  if (typeof callback !== "function") throw invalidArgs("callback must be a function");
+  phase = 0;
+  asyncCall = true;
+  callSignal = undefined;
+  jobKind = true;
+  jobTarget = callback;
+  let value: any;
+  try {
+    value = fn(a, b, c, d, e, f);
+  } catch (err) {
+    asyncCall = false;
+    callSignal = undefined;
+    jobTarget = undefined;
+    if (phase === 0) throw err;
+    phase = 0;
+    complete(1, callback, err, true);
+    return;
+  }
+  asyncCall = false;
+  phase = 0;
+  jobTarget = undefined;
+  if (value !== JOB) complete(1, callback, value, false, callSignal);
+  callSignal = undefined;
+}
+
 function runCallback(fn: Function, callback: any, args: any[]): void {
   if (typeof callback !== "function") throw invalidArgs("callback must be a function");
   phase = 0;
@@ -1908,22 +1963,24 @@ function watchFile(path: any, options?: any, listener?: any): StatWatcher {
 
 /** `x(...)`: a promise of `xSync`'s result (or error). */
 function asyncOf(sync: Function, name: string, length: number): Function {
-  const fn = {
-    [name](...args: any[]): Promise<any> {
-      return runAsync(sync, args);
-    },
-  }[name];
+  // (A function that counts its arguments gets them all; the others six,
+  // the missing ones undefined, as they take them: compiled natively,
+  // without an array of them.)
+  const fn = COUNTS_ARGUMENTS.has(sync)
+    ? (...args: any[]): Promise<any> => runAsync(sync, args)
+    : (a?: any, b?: any, c?: any, d?: any, e?: any, f?: any): Promise<any> => runAsync6(sync, a, b, c, d, e, f);
+  Object.defineProperty(fn, "name", { value: name });
   Object.defineProperty(fn, "length", { value: length });
   return fn;
 }
 
 /** `xCb(callback, ...)`: `xSync`'s result to Node's callback. */
 function callbackOf(sync: Function, name: string, length: number): Function {
-  const fn = {
-    [name](callback: any, ...args: any[]): void {
-      runCallback(sync, callback, args);
-    },
-  }[name];
+  const fn = COUNTS_ARGUMENTS.has(sync)
+    ? (callback: any, ...args: any[]): void => runCallback(sync, callback, args)
+    : (callback: any, a?: any, b?: any, c?: any, d?: any, e?: any, f?: any): void =>
+        runCallback6(sync, callback, a, b, c, d, e, f);
+  Object.defineProperty(fn, "name", { value: name });
   Object.defineProperty(fn, "length", { value: length });
   return fn;
 }
@@ -1993,6 +2050,9 @@ const operations: [string, Function, number, number, number][] = [
   ["writeFile", writeFileSync, 3, 4, 5],
   ["writev", writevSync, 3, 4, 5],
 ];
+
+// The synchronous forms that count their arguments (`...args`).
+const COUNTS_ARGUMENTS = new Set<Function>([cpSync, chownSync, lchownSync, fchownSync, utimesSync, lutimesSync, futimesSync]);
 
 for (const [name, sync, syncLength, asyncLength, callbackLength] of operations) {
   Object.defineProperty(sync, "name", { value: name + "Sync" });
