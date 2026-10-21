@@ -173,17 +173,48 @@ int beyond_js_uncaught(void) {
 
 // reportError(error): to process's 'uncaughtException' listeners, else
 // printed as an uncaught exception.
-static JSValue js_report_error(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
-    JSValueConst err = argc > 0 ? argv[0] : JS_UNDEFINED;
+static void report_error(JSContext *c, JSValueConst err) {
     int h = uncaught ? 0 : to_listeners(err, "uncaughtException", JS_UNDEFINED);
     if (h == 1)
-        return JS_UNDEFINED;
+        return;
     beyond_flush_stdout();
     if (h == 0)
         JS_Throw(c, JS_DupValue(c, err));
     js_std_dump_error(c);
     uncaught = 1;
+}
+
+static JSValue js_report_error(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    report_error(c, argc > 0 ? argv[0] : JS_UNDEFINED);
     return JS_UNDEFINED;
+}
+
+// guardCallback(callback): Bun's (internal/shared): a function that calls
+// the callback with its arguments (`this` undefined), and reports what it
+// throws as reportError does (Bun's reportUncaughtException). Native: Bun's
+// counts its arguments not to make an `arguments` object, which it is here
+// (and an ordinary function's closure its `prototype`), a call.
+static JSValue guarded_fast(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, JSValueConst *data) {
+    JSValue r = JS_Call(c, data[0], JS_UNDEFINED, argc, argv);
+    if (JS_IsException(r)) {
+        JSValue e = JS_GetException(c);
+        report_error(c, e);
+        JS_FreeValue(c, e);
+        return JS_UNDEFINED;
+    }
+    return r;
+}
+
+static JSValue guarded(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv, int magic, JSValueConst *data) {
+    return guarded_fast(c, this_val, argc, argv, data);
+}
+
+static JSValue js_guard_callback(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    static JSAtom name;
+    static void *shape;
+    if (!name && !(name = JS_NewAtom(c, "guarded")))
+        return JS_EXCEPTION;
+    return JS_NewCFunctionDataShaped(c, guarded_fast, guarded, name, 3, 0, 1, argv, JS_UNDEFINED, &shape);
 }
 
 // setProcessHooks(beforeExit, exit, uncaught): beforeExit() emits the event,
@@ -290,6 +321,7 @@ static const JSCFunctionListEntry functions[] = {
     JS_CFUNC_DEF("onTimer", 1, js_on_timer),
     JS_CFUNC_DEF("now", 0, js_now),
     JS_CFUNC_DEF("reportError", 1, js_report_error),
+    JS_CFUNC_DEF("guardCallback", 1, js_guard_callback),
     JS_CFUNC_DEF("promiseNew", 0, js_promise_new),
     JS_CFUNC_DEF("promiseSettle", 3, js_promise_settle),
     JS_CFUNC_DEF("getEnv", 1, js_get_env),

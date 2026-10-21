@@ -3,6 +3,7 @@ import { console } from "beyond:console";
 import { jsFunctionReportUncaughtException as __native_BunProcess_jsFunctionReportUncaughtException } from "node:internal/bindings/BunProcess";
 import { jsFunctionIsFrameOfStoppedModuleGraph as __native_ModuleGraph_jsFunctionIsFrameOfStoppedModuleGraph } from "node:internal/bindings/ModuleGraph";
 import { $isJSArray, $putByIdDirectPrivate } from "node:internal/intrinsics";
+import { guardCallback as nativeGuardCallback } from "beyond:native";
 const ObjectFreeze = Object.freeze;
 
 class NotImplementedError extends Error {
@@ -163,26 +164,10 @@ const reportUncaughtException = __native_BunProcess_jsFunctionReportUncaughtExce
 // Wrap a node-style callback so a throw inside it takes the uncaught path. The
 // callback keeps its place in the event loop; only the throw is rerouted. The
 // arity switch avoids materializing `arguments` for the shapes fs and dns use.
-function guardCallback(callback) {
-  return function guarded(a?, b?, c?) {
-    try {
-      switch (arguments.length) {
-        case 0:
-          return callback();
-        case 1:
-          return callback(a);
-        case 2:
-          return callback(a, b);
-        case 3:
-          return callback(a, b, c);
-        default:
-          return callback.apply(undefined, arguments);
-      }
-    } catch (e) {
-      reportUncaughtException(e);
-    }
-  };
-}
+// (Beyond: beyond:native's, which is this function natively: here
+// `arguments` is an object made each call whatever the switch, and an
+// ordinary function's closure has a `prototype` to make.)
+const guardCallback: (callback: Function) => Function = nativeGuardCallback;
 
 const nodeModulesRE = /[\\/]node_modules[\\/]/;
 const ErrorCaptureStackTrace = Error.captureStackTrace;
