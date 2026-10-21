@@ -892,21 +892,33 @@ static JSValue js_fs_close(JSContext *c, JSValueConst this_val, int argc, JSValu
     return JS_UNDEFINED;
 }
 
+// The bytes of a Uint8Array for a read (`checked`: null without an
+// exception when it is not one, or empty).
+static uint8_t *read_bytes(JSContext *c, JSValueConst v, size_t *size, int checked) {
+    if (checked && JS_GetTypedArrayType(v) != JS_TYPED_ARRAY_UINT8) {
+        *size = 0;
+        return NULL;
+    }
+    return JS_GetUint8Array(c, size, v);
+}
+
 // fsRead(fd, uint8array, offset, length, position): the bytes read
-// (pread at a position >= 0).
-static JSValue js_fs_read(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+// (pread at a position >= 0). fsReadChecked: null (nothing read) when it is
+// not a Uint8Array, or the bytes are out of it (the binding's checks then
+// throw Bun's errors).
+static JSValue fs_read(JSContext *c, JSValueConst *argv, int checked) {
     int32_t fd;
     size_t size;
     int64_t off, len, pos;
     if (to_i32(c, argv[0], &fd))
         return JS_EXCEPTION;
-    uint8_t *b = JS_GetUint8Array(c, &size, argv[1]);
-    if (!b && size == 0 && JS_HasException(c))
-        return JS_EXCEPTION;
+    uint8_t *b = read_bytes(c, argv[1], &size, checked);
+    if (!b && size == 0 && (checked || JS_HasException(c)))
+        return checked ? JS_NULL : JS_EXCEPTION;
     if (JS_ToInt64(c, &off, argv[2]) || JS_ToInt64(c, &len, argv[3]) || to_pos(c, argv[4], &pos))
         return JS_EXCEPTION;
     if (off < 0 || len < 0 || (uint64_t)off > size || (uint64_t)len > size - (uint64_t)off)
-        return JS_ThrowRangeError(c, "read out of the buffer's bounds");
+        return checked ? JS_NULL : JS_ThrowRangeError(c, "read out of the buffer's bounds");
     ssize_t n;
     do
         n = pos >= 0 ? pread(fd, b + off, len, pos) : read(fd, b + off, len);
@@ -916,18 +928,27 @@ static JSValue js_fs_read(JSContext *c, JSValueConst this_val, int argc, JSValue
     return JS_NewInt64(c, n);
 }
 
+static JSValue js_fs_read(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return fs_read(c, argv, 0);
+}
+
+static JSValue js_fs_read_checked(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return fs_read(c, argv, 1);
+}
+
 // fsWrite(fd, uint8array, offset, length, position): the bytes written
 // (one write, as Bun's); the length -1: the rest of the buffer. Null when
 // the offset is past the buffer's end, or the length past it or 2^31 - 1.
-static JSValue js_fs_write(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+// fsWriteChecked: also null when it is not a Uint8Array.
+static JSValue fs_write(JSContext *c, JSValueConst *argv, int checked) {
     int32_t fd;
     size_t size;
     int64_t off, len, pos;
     if (to_i32(c, argv[0], &fd))
         return JS_EXCEPTION;
-    uint8_t *b = JS_GetUint8Array(c, &size, argv[1]);
-    if (!b && size == 0 && JS_HasException(c))
-        return JS_EXCEPTION;
+    uint8_t *b = read_bytes(c, argv[1], &size, checked);
+    if (!b && size == 0 && (checked ? JS_GetTypedArrayType(argv[1]) != JS_TYPED_ARRAY_UINT8 : JS_HasException(c)))
+        return checked ? JS_NULL : JS_EXCEPTION;
     if (JS_ToInt64(c, &off, argv[2]) || JS_ToInt64(c, &len, argv[3]) || to_pos(c, argv[4], &pos))
         return JS_EXCEPTION;
     if (off < 0 || (uint64_t)off > size)
@@ -943,6 +964,14 @@ static JSValue js_fs_write(JSContext *c, JSValueConst this_val, int argc, JSValu
     if (n < 0)
         return throw_sys(c, errno, "write", NULL, NULL, pos >= 0 ? fd : -1, 0);
     return JS_NewInt64(c, n);
+}
+
+static JSValue js_fs_write(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return fs_write(c, argv, 0);
+}
+
+static JSValue js_fs_write_checked(JSContext *c, JSValueConst this_val, int argc, JSValueConst *argv) {
+    return fs_write(c, argv, 1);
 }
 
 // fsWriteString(fd, string, position): writes its UTF-8 (lone surrogates
@@ -4054,13 +4083,22 @@ static JSValue js_fs_rw_job(JSContext *c, JSValueConst this_val, int argc, JSVal
     int32_t fd;
     size_t size;
     int64_t off, len, pos;
+    // (magic 0: a read, 1: a write; 2 and 3 those checked, as fsReadChecked
+    // and fsWriteChecked)
+    int checked = magic >= 2;
+    if (checked)
+        magic -= 2;
     if (to_i32(c, argv[0], &fd))
         return JS_EXCEPTION;
-    uint8_t *b = JS_GetUint8Array(c, &size, argv[1]);
-    if (!b && size == 0 && JS_HasException(c))
-        return JS_EXCEPTION;
+    uint8_t *b = read_bytes(c, argv[1], &size, checked);
+    // (An empty Uint8Array's bytes: none, which a write's bounds check.)
+    if (!b && size == 0 &&
+        (checked ? !magic || JS_GetTypedArrayType(argv[1]) != JS_TYPED_ARRAY_UINT8 : JS_HasException(c)))
+        return checked ? JS_NULL : JS_EXCEPTION;
     if (JS_ToInt64(c, &off, argv[2]) || JS_ToInt64(c, &len, argv[3]) || to_pos(c, argv[4], &pos))
         return JS_EXCEPTION;
+    if (checked && !magic && (off < 0 || len < 0 || (uint64_t)off > size || (uint64_t)len > size - (uint64_t)off))
+        return JS_NULL;
     if (magic) {
         if (off < 0 || (uint64_t)off > size)
             return JS_NULL;
@@ -5337,7 +5375,9 @@ const JSCFunctionListEntry beyond_fs_functions[] = {
     JS_CFUNC_DEF("fsOpen", 3, js_fs_open),
     JS_CFUNC_DEF("fsClose", 1, js_fs_close),
     JS_CFUNC_DEF("fsRead", 5, js_fs_read),
+    JS_CFUNC_DEF("fsReadChecked", 5, js_fs_read_checked),
     JS_CFUNC_DEF("fsWrite", 5, js_fs_write),
+    JS_CFUNC_DEF("fsWriteChecked", 5, js_fs_write_checked),
     JS_CFUNC_DEF("fsWriteString", 3, js_fs_write_string),
     JS_CFUNC_MAGIC_DEF("fsReadv", 3, js_fs_rwv, 0),
     JS_CFUNC_MAGIC_DEF("fsWritev", 3, js_fs_rwv, 1),
@@ -5382,7 +5422,9 @@ const JSCFunctionListEntry beyond_fs_functions[] = {
     JS_CFUNC_DEF("fsOpenJob", 5, js_fs_open_job),
     JS_CFUNC_DEF("fsCloseJob", 3, js_fs_close_job),
     JS_CFUNC_MAGIC_DEF("fsReadJob", 7, js_fs_rw_job, 0),
+    JS_CFUNC_MAGIC_DEF("fsReadJobChecked", 7, js_fs_rw_job, 2),
     JS_CFUNC_MAGIC_DEF("fsWriteJob", 7, js_fs_rw_job, 1),
+    JS_CFUNC_MAGIC_DEF("fsWriteJobChecked", 7, js_fs_rw_job, 3),
     JS_CFUNC_DEF("fsWriteStringJob", 5, js_fs_write_string_job),
     JS_CFUNC_MAGIC_DEF("fsReadvJob", 5, js_fs_rwv_job, 0),
     JS_CFUNC_MAGIC_DEF("fsWritevJob", 5, js_fs_rwv_job, 1),

@@ -8,6 +8,7 @@ import { $ERR_INTERNAL_ASSERTION, $ERR_INVALID_ARG_TYPE, $ERR_INVALID_STATE, $ER
 import types from "node:util/types";
 import EventEmitter from "node:events";
 import fs from "node:internal/fs/binding";
+import { takesSix } from "node:internal/bindings/node_fs_binding";
 // (Beyond: `$data`, a private name in Bun, through an internal module.)
 import { setPromisesData } from "node:internal/fs/private";
 import { validateInteger, validateBoolean, validateObject, validateAbortSignal, validateEncoding } from "node:internal/validators";
@@ -394,9 +395,16 @@ export default exports;
 
 // TODO: remove this in favor of just returning js functions that don't check `this`
 function asyncWrap(fn: any, name: string) {
-  const wrapped = async function (...args) {
-    return fn.apply(fs, args);
-  };
+  // (Beyond: a function of the binding's that takes six arguments whatever
+  // it is given is called with them directly: a rest array and `apply`
+  // cost a call more than JavaScriptCore's.)
+  const wrapped = takesSix(fn)
+    ? async function (a?, b?, c?, d?, e?, f?) {
+        return fn(a, b, c, d, e, f);
+      }
+    : async function (...args) {
+        return fn.apply(fs, args);
+      };
   Object.defineProperty(wrapped, "name", { value: name });
   Object.defineProperty(wrapped, "length", { value: fn.length });
   return wrapped;

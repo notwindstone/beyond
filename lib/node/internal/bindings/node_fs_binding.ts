@@ -43,6 +43,7 @@ import {
   fsMkdtemp,
   fsOpen,
   fsRead,
+  fsReadChecked,
   fsReadFile,
   fsReaddir,
   fsReadlink,
@@ -62,6 +63,7 @@ import {
   fsWatchRef,
   fsWatchStart,
   fsWrite,
+  fsWriteChecked,
   fsWriteFile,
   fsWriteString,
   fsWritev,
@@ -88,6 +90,7 @@ import {
   fsPoolInit,
   fsReadFileJob,
   fsReadJob,
+  fsReadJobChecked,
   fsReaddirJob,
   fsReadlinkJob,
   fsReadvJob,
@@ -104,6 +107,7 @@ import {
   fsUtimesJob,
   fsWriteFileJob,
   fsWriteJob,
+  fsWriteJobChecked,
   fsWriteStringJob,
   fsWritevJob,
   promiseNew,
@@ -1416,6 +1420,32 @@ function openSync(path: any, flags?: any, mode?: any): number {
 }
 
 function readSync(fd: any, buffer?: any, offset?: any, length?: any, position?: any): number {
+  // The usual call: a Uint8Array, and int32 offset, length and position, its
+  // bounds checked natively; else (or out of them: null, nothing read) the
+  // checks below, which throw Bun's errors.
+  if (
+    typeof fd === "number" &&
+    (fd | 0) === fd &&
+    fd >= 0 &&
+    buffer instanceof Uint8Array &&
+    typeof offset === "number" &&
+    (offset | 0) === offset &&
+    offset >= 0 &&
+    typeof length === "number" &&
+    (length | 0) === length &&
+    length > 0 &&
+    (position === undefined ||
+      position === null ||
+      (typeof position === "number" && (position | 0) === position && position >= -1))
+  ) {
+    const p = position === undefined || position === null ? -1 : position;
+    phase = 1;
+    const r = asyncCall
+      ? fsReadJobChecked(fd, buffer, offset, length, p, jobKind, jobTarget)
+      : fsReadChecked(fd, buffer, offset, length, p);
+    if (r !== null) return asyncCall ? JOB : r;
+    phase = 0;
+  }
   const f = fdArg(fd);
   if (!isBufferLike(buffer)) {
     throw codedTypeError(
@@ -1452,6 +1482,30 @@ function readSync(fd: any, buffer?: any, offset?: any, length?: any, position?: 
 }
 
 function writeSync(fd: any, buffer?: any, offsetOrPosition?: any, lengthOrEncoding?: any, position?: any): number {
+  // The usual call: a Uint8Array, and int32 offset and length, its bounds
+  // checked natively; else (or out of them: null, nothing written) the
+  // checks below, which throw Bun's errors.
+  if (
+    typeof fd === "number" &&
+    (fd | 0) === fd &&
+    fd >= 0 &&
+    buffer instanceof Uint8Array &&
+    typeof offsetOrPosition === "number" &&
+    (offsetOrPosition | 0) === offsetOrPosition &&
+    offsetOrPosition >= 0 &&
+    typeof lengthOrEncoding === "number" &&
+    (lengthOrEncoding | 0) === lengthOrEncoding &&
+    lengthOrEncoding >= 0 &&
+    typeof position !== "bigint"
+  ) {
+    const p = typeof position === "number" ? offsetArg(position) : -1;
+    phase = 1;
+    const r = asyncCall
+      ? fsWriteJobChecked(fd, buffer, offsetOrPosition, lengthOrEncoding, p, jobKind, jobTarget)
+      : fsWriteChecked(fd, buffer, offsetOrPosition, lengthOrEncoding, p);
+    if (r !== null) return asyncCall ? JOB : r;
+    phase = 0;
+  }
   const f = fdArg(fd);
   if (typeof buffer === "string") {
     // fs.write(fd, string[, position[, encoding]])
@@ -1966,12 +2020,24 @@ function asyncOf(sync: Function, name: string, length: number): Function {
   // (A function that counts its arguments gets them all; the others six,
   // the missing ones undefined, as they take them: compiled natively,
   // without an array of them.)
-  const fn = COUNTS_ARGUMENTS.has(sync)
+  const counts = COUNTS_ARGUMENTS.has(sync);
+  const fn = counts
     ? (...args: any[]): Promise<any> => runAsync(sync, args)
     : (a?: any, b?: any, c?: any, d?: any, e?: any, f?: any): Promise<any> => runAsync6(sync, a, b, c, d, e, f);
+  if (!counts) SIX.add(fn);
   Object.defineProperty(fn, "name", { value: name });
   Object.defineProperty(fn, "length", { value: length });
   return fn;
+}
+
+// The asynchronous forms that take six arguments, the missing ones
+// undefined, whatever they are given (arrow functions: `this` is not
+// theirs).
+const SIX = new WeakSet<Function>();
+
+/** Whether `fn` is one of those (`fn(a, b, c, d, e, f)` is `fn.apply(x, args)`). */
+export function takesSix(fn: Function): boolean {
+  return SIX.has(fn);
 }
 
 /** `xCb(callback, ...)`: `xSync`'s result to Node's callback. */
