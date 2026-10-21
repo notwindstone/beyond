@@ -393,10 +393,12 @@ enum { SHAPE_STATS, SHAPE_BIGSTATS, SHAPE_STATFS, SHAPE_BIGSTATFS, SHAPE_DIRENT 
 static JSValue watch_dispatch = JS_UNDEFINED;
 
 static void pool_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
+static void vals_mark(JSRuntime *rt, JS_MarkFunc *mark_func);
 
 static void fs_mark(JSRuntime *rt, void *opaque, JS_MarkFunc *mark_func) {
     (void)opaque;
     pool_mark(rt, mark_func);
+    vals_mark(rt, mark_func);
     JS_MarkValue(rt, watch_dispatch, mark_func);
     JS_MarkValue(rt, buffer_proto, mark_func);
     JS_MarkValue(rt, dirent_proto, mark_func);
@@ -1859,16 +1861,47 @@ typedef struct {
 } QItem;
 
 // Values gathered for an array made at once (JS_NewArrayFrom: without
-// growing it, nor setting each).
-typedef struct {
+// growing it, nor setting each). The collector doesn't see malloc'd
+// memory, so the vectors being filled are linked for fs_mark to mark.
+typedef struct ValVec {
     JSValue *v;
     uint32_t n, cap;
+    struct ValVec *next;
+    bool linked;
 } ValVec;
+
+static ValVec *vals_live; // (JavaScript thread)
+
+static void vals_link(ValVec *a) {
+    if (a->linked)
+        return;
+    a->next = vals_live;
+    vals_live = a;
+    a->linked = true;
+}
+
+static void vals_unlink(ValVec *a) {
+    if (!a->linked)
+        return;
+    for (ValVec **pp = &vals_live; *pp; pp = &(*pp)->next)
+        if (*pp == a) {
+            *pp = a->next;
+            break;
+        }
+    a->linked = false;
+}
+
+static void vals_mark(JSRuntime *rt, JS_MarkFunc *mark_func) {
+    for (ValVec *a = vals_live; a; a = a->next)
+        for (uint32_t i = 0; i < a->n; i++)
+            JS_MarkValue(rt, a->v[i], mark_func);
+}
 
 // Adds v (taken): 0, or -1 (freed; an exception).
 static int vals_push(JSContext *c, ValVec *a, JSValue v) {
     if (JS_IsException(v))
         return -1;
+    vals_link(a);
     if (a->n == a->cap) {
         uint32_t cap = a->cap ? a->cap * 2 : 16;
         JSValue *nv = js_realloc(c, a->v, cap * sizeof *nv);
@@ -1885,17 +1918,22 @@ static int vals_push(JSContext *c, ValVec *a, JSValue v) {
 
 // The array of the values (taken).
 static JSValue vals_array(JSContext *c, ValVec *a) {
+    // (Still marked while the array is allocated.)
     JSValue r = JS_NewArrayFrom(c, (int)a->n, a->v);
+    vals_unlink(a);
     js_free(c, a->v);
     a->v = NULL;
+    a->n = 0;
     return r;
 }
 
 static void vals_free(JSContext *c, ValVec *a) {
+    vals_unlink(a);
     for (uint32_t i = 0; i < a->n; i++)
         JS_FreeValue(c, a->v[i]);
     js_free(c, a->v);
     a->v = NULL;
+    a->n = 0;
 }
 
 // fsReaddir(path, kind, recursive, encoding): the names (strings of the
@@ -3308,6 +3346,8 @@ static atomic_int js_parked;
 enum { SYNC_PENDING, SYNC_SIGNALED, SYNC_WAKING };
 static _Atomic uint32_t pool_sync;
 static uint32_t pool_max;
+// The threads spinning before they sleep (pool_spin: one at most).
+static atomic_int pool_spinners;
 // What the threads asleep wait on: tokens, one a thread to wake (Bun's
 // Event holds one; a burst of jobs a thread queued wakes several at once,
 // pool_boost).
@@ -3455,8 +3495,9 @@ static void pool_notify_slow(int is_waking) {
         } else if (s & SYNC_NOTIFIED) {
             return;
         }
-        if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_release, memory_order_relaxed)) {
-            if (wake)
+        if (atomic_compare_exchange_weak_explicit(&pool_sync, &s, n, memory_order_seq_cst, memory_order_relaxed)) {
+            // (A thread spinning takes the notification: no wake.)
+            if (wake && !atomic_load_explicit(&pool_spinners, memory_order_seq_cst))
                 event_notify(1);
             else if (spawn)
                 pool_spawn();
@@ -3471,6 +3512,40 @@ static inline void pool_notify(int is_waking) {
     if (!is_waking && atomic_fetch_or_explicit(&pool_sync, 0, memory_order_release) & SYNC_NOTIFIED)
         return;
     pool_notify_slow(is_waking);
+}
+
+// A thread out of work (one at a time) spins a while before sleeping, for
+// a call that comes soon after the last (a stream's reads, one after
+// another): a thread asleep takes tens of microseconds to wake. Whether a
+// notification came meanwhile (this thread takes it: no thread is woken
+// for it, see pool_notify_slow).
+#define POOL_SPIN_NS 50000L
+
+static bool pool_spin(void) {
+    // (Only a thread that spins counts: one that counted itself a moment
+    // while another spun would let a notifier skip the wake its
+    // notification needs.)
+    int none = 0;
+    if (!atomic_compare_exchange_strong_explicit(&pool_spinners, &none, 1, memory_order_seq_cst, memory_order_relaxed))
+        return false;
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    bool got = false;
+    for (int i = 0;; i++) {
+        cpu_relax();
+        if (atomic_load_explicit(&pool_sync, memory_order_relaxed) & SYNC_NOTIFIED) {
+            got = true;
+            break;
+        }
+        if ((i & 63) == 63) {
+            clock_gettime(CLOCK_MONOTONIC, &t);
+            if ((t.tv_sec - t0.tv_sec) * 1000000000L + (t.tv_nsec - t0.tv_nsec) > POOL_SPIN_NS)
+                break;
+        }
+    }
+    atomic_fetch_sub_explicit(&pool_spinners, 1, memory_order_seq_cst);
+    // (A notification made as it stopped, which woke no thread: taken.)
+    return got || (atomic_load_explicit(&pool_sync, memory_order_seq_cst) & SYNC_NOTIFIED);
 }
 
 // Takes a notification, or sleeps until one: whether this thread is the
@@ -3500,7 +3575,8 @@ static int pool_wait(int is_waking) {
                 is_idle = 1;
             }
         } else {
-            event_wait();
+            if (!pool_spin())
+                event_wait();
             s = atomic_load_explicit(&pool_sync, memory_order_relaxed);
         }
     }
