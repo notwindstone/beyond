@@ -36,6 +36,9 @@ enum Cmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Show which functions compile natively and why the others do not,
+    /// and which object literals make objects of stable layouts.
+    Report { input: PathBuf },
 }
 
 /// Beyond's source tree (its lib/ modules).
@@ -184,6 +187,13 @@ fn real_main() -> Result<()> {
             });
             let _ = std::fs::remove_dir_all(&dir);
             std::process::exit(r?);
+        }
+        Cmd::Report { input } => {
+            let mut opts = BuildOpts::default();
+            embed(&mut opts)?;
+            let (bundle, analysis) = luminous_cli::analyze_with(&input, &fopts, &opts.embed)?;
+            luminous_cli::print_report(&bundle, &analysis);
+            Ok(())
         }
     }
 }
